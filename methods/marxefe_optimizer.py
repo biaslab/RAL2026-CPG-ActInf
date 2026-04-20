@@ -25,9 +25,9 @@ import numpy.random as rnd
 import pybullet as p
 import pybullet_data
 import torch
+import casadi as ca
 from numpy.linalg import slogdet
 from scipy.linalg import det, inv
-from scipy.optimize import minimize
 from scipy.special import gamma, gammaln
 from scipy.stats import multivariate_normal
 
@@ -158,20 +158,92 @@ class MARXAgent:
 
         return J
 
-    def minimizeEFE(self, u_0=None, verbose=False, control_lims=(-np.inf, np.inf)):
+    def minimizeEFE(self, u_0=None, verbose=False, control_lims=(-np.inf, np.inf),
+                    lambda_energy=0.0, max_iter=200, tol=1e-6):
+        """Minimize EFE (+ optional ||u||^2 energy term) via CasADi/IPOPT.
+
+        control_lims can be a single (lo, hi) tuple applied to all dims, or a
+        list of per-dim (lo, hi) tuples of length thorizon*Du.
+        """
+        Du = self.Du
+        thorizon = self.thorizon
+        n_u = thorizon * Du
+
         if u_0 is None:
-            u_0 = 1e-8 * np.random.randn(self.thorizon)
+            u_0 = 1e-8 * np.random.randn(n_u)
+        u_0 = np.asarray(u_0, dtype=float).reshape(-1)
+        if u_0.size != n_u:
+            u_0 = np.tile(np.asarray(self.μ, dtype=float), thorizon)
 
-        def J(u):
-            return self.EFE(u)
+        if (isinstance(control_lims, tuple)
+                and len(control_lims) == 2
+                and np.isscalar(control_lims[0])):
+            lbx = np.full(n_u, float(control_lims[0]))
+            ubx = np.full(n_u, float(control_lims[1]))
+        else:
+            lbx = np.array([b[0] for b in control_lims], dtype=float)
+            ubx = np.array([b[1] for b in control_lims], dtype=float)
 
-        bounds = [control_lims] * u_0.size
-        result = minimize(J,
-                          u_0,
-                          method='L-BFGS-B',
-                          bounds=bounds,
-                          options={'disp': verbose, 'maxiter': 10000})
-        return result.x
+        Dy = self.Dy
+        eta = float(self.ν - Dy + 1)
+        inv_L = np.linalg.inv(self.Λ)
+        M_T = self.M.T
+        m_star = np.asarray(self.goal_prior.mean, dtype=float).reshape(-1, 1)
+        inv_S_star = np.linalg.inv(self.goal_prior.cov)
+        tr_iSOmega = float(np.trace(inv_S_star @ self.Ω))
+        mu_prior = np.asarray(self.μ, dtype=float).reshape(-1, 1)
+        Upsilon = np.asarray(self.Υ, dtype=float)
+        log_inv_O_det = float(slogdet(np.linalg.inv(self.Ω))[1])
+
+        ybuf = ca.DM(self.ybuffer)
+        ubuf = ca.DM(self.ubuffer)
+
+        u_sym = ca.MX.sym('u', n_u)
+        J_sym = ca.MX(0)
+
+        inv_L_dm      = ca.DM(inv_L)
+        M_T_dm        = ca.DM(M_T)
+        m_star_dm     = ca.DM(m_star)
+        inv_S_star_dm = ca.DM(inv_S_star)
+        mu_prior_dm   = ca.DM(mu_prior)
+        Upsilon_dm    = ca.DM(Upsilon)
+
+        for t in range(thorizon):
+            u_t = u_sym[t * Du:(t + 1) * Du]
+
+            ubuf = ca.horzcat(u_t, ubuf[:, :-1])
+            x_t = ca.vertcat(ca.reshape(ubuf.T, -1, 1),
+                             ca.reshape(ybuf.T, -1, 1))
+
+            scale = 1.0 + (x_t.T @ inv_L_dm @ x_t)
+            mi = Dy * ca.log(eta) - Dy * ca.log(scale) + log_inv_O_det
+
+            mu_t = M_T_dm @ x_t
+            diff = mu_t - m_star_dm
+            ce_mahal = diff.T @ inv_S_star_dm @ diff
+            ce = 0.5 * (scale / (eta - 2) * tr_iSOmega + ce_mahal)
+
+            up_diff = u_t - mu_prior_dm
+            cp = 0.5 * (up_diff.T @ Upsilon_dm @ up_diff)
+
+            J_sym = J_sym + mi + ce + cp
+            if lambda_energy != 0.0:
+                J_sym = J_sym + lambda_energy * (u_t.T @ u_t)
+
+            ybuf = ca.horzcat(mu_t, ybuf[:, :-1])
+
+        nlp = {'x': u_sym, 'f': J_sym}
+        opts = {
+            'print_time': False,
+            'ipopt.print_level': 5 if verbose else 0,
+            'ipopt.sb': 'yes',
+            'ipopt.max_iter': int(max_iter),
+            'ipopt.tol': float(tol),
+            'ipopt.hessian_approximation': 'limited-memory',
+        }
+        solver = ca.nlpsol('efe_solver', 'ipopt', nlp, opts)
+        sol = solver(x0=u_0, lbx=lbx, ubx=ubx)
+        return np.array(sol['x']).reshape(-1)
 
     def backshift(self, x, a):
         if x.ndim == 2:
@@ -229,47 +301,6 @@ class MARXAgent:
         self.ybuffer = np.zeros((self.Dy, self.delay_out))
         self.free_energy = float('inf')
 
-
-def acc2pos(acc, prev_state, dt=1.0, reg=1e-3):
-    """Kalman filter for accelerometer integration."""
-    A = np.array([[1, 0, 0, dt,  0,  0, dt**2/2,       0,       0],
-                  [0, 1, 0,  0, dt,  0,       0, dt**2/2,       0],
-                  [0, 0, 1,  0,  0, dt,       0,       0, dt**2/2],
-                  [0, 0, 0,  1,  0,  0,      dt,       0,       0],
-                  [0, 0, 0,  0,  1,  0,       0,      dt,       0],
-                  [0, 0, 0,  0,  0,  1,       0,       0,      dt],
-                  [0, 0, 0,  0,  0,  0,       1,       0,       0],
-                  [0, 0, 0,  0,  0,  0,       0,       1,       0],
-                  [0, 0, 0,  0,  0,  0,       0,       0,       1]])
-
-    σ = 1.0
-    block1 = np.diag(np.repeat([dt**5/20], 3))
-    block2 = np.diag(np.repeat([dt**4/8], 3))
-    block3 = np.diag(np.repeat([dt**3/6], 3))
-    block4 = np.diag(np.repeat([dt**2/2], 3))
-    block5 = np.diag(np.repeat([dt], 3))
-    Q = σ * np.block([[block1, block2, block3],
-                      [block2, block3, block4],
-                      [block3, block4, block5]])
-
-    C = np.array([[0, 0, 0, 0, 0, 0, 1, 0, 0],
-                  [0, 0, 0, 0, 0, 0, 0, 1, 0],
-                  [0, 0, 0, 0, 0, 0, 0, 0, 1]])
-
-    ρ = 1.0
-    R = np.diag(ρ * np.ones(3))
-
-    state_pred_m = A @ prev_state.mean
-    state_pred_S = A @ prev_state.cov @ A.T + Q
-
-    Is = C @ state_pred_S @ C.T + R
-    Kg = state_pred_S @ C.T @ inv(Is)
-    state_m = state_pred_m + Kg @ (acc - C @ state_pred_m)
-    state_S = (np.eye(9) - Kg @ C) @ state_pred_S + reg * np.eye(9)
-
-    state = multivariate_normal(state_m, state_S)
-
-    return state_m[:3], state
 
 # Control prior hyperparameter: bounds [lower_i, upper_i] correspond to
 # mu_i ± n_sigma * sigma_i.
@@ -344,7 +375,7 @@ def compute_feedback_u(x_vec, y_vec, w_vec, k_matrix, contacts, phases,
 
 
 # =============================================================================
-# ENVIRONMENT AND ROBOT SETUP - MATCHES BO
+# ENVIRONMENT AND ROBOT SETUP
 # =============================================================================
 
 def load_environment(dt, use_gui=False):
@@ -366,7 +397,7 @@ def load_environment(dt, use_gui=False):
     return p
 
 
-def load_robot(p):
+def load_robot(p, robot_mass=10.0):
     """Load Laikago robot and extract joint/link information."""
     start_position    = [0.0, 0.0, 0.55]
     start_orientation = [0.0, 0.5, 0.5, 0.0]
@@ -379,7 +410,7 @@ def load_robot(p):
         flags=urdfFlags,
         useFixedBase=False
     )
-    p.changeDynamics(robot, -1, mass=10.0)
+    p.changeDynamics(robot, -1, mass=float(robot_mass))
 
     n_joints    = p.getNumJoints(robot)
     joints_info = {}
@@ -419,7 +450,7 @@ def load_robot(p):
 
 
 # =============================================================================
-# STATE OBSERVATION / FALL DETECTION - MATCHES BO
+# STATE OBSERVATION / FALL DETECTION
 # =============================================================================
 
 DEFAULT_ORI = [0.0, 0.5, 0.5, 0.0]
@@ -589,14 +620,6 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
     hip_joint_ids  = [1, 5, 9, 13]
     knee_joint_ids = [2, 6, 10, 14]
 
-    def EFE_with_energy(policy_flat):
-        G_original  = agent.EFE(policy_flat)
-        effort_term = 0.0
-        for t_h in range(agent.thorizon):
-            u_t = policy_flat[t_h * agent.Du:(t_h + 1) * agent.Du]
-            effort_term += np.sum(u_t ** 2)
-        return G_original + lambda_energy * effort_term
-
     DEBOUNCE_THRESHOLD   = 2
     debounced_contacts   = np.zeros(n_legs, dtype=int)
     contact_change_count = np.zeros(n_legs, dtype=int)
@@ -724,18 +747,18 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
                     bounds_agent.append((bounds_lower[i].item(), bounds_upper[i].item()))
 
             try:
-                results = minimize(
-                    EFE_with_energy,
-                    policy,
-                    method='L-BFGS-B',
-                    bounds=bounds_agent,
-                    options={'disp': False, 'maxiter': 100, 'ftol': 1e-4}
+                u_opt = agent.minimizeEFE(
+                    u_0           = policy,
+                    control_lims  = bounds_agent,
+                    lambda_energy = lambda_energy,
+                    max_iter      = 100,
+                    tol           = 1e-4,
                 )
 
                 if k_step < 2 * action_update_frequency:
                     policy = np.tile(agent.μ, agent.thorizon)
                 else:
-                    policy = results.x
+                    policy = u_opt
 
             except Exception as e:
                 print(f"Warning: EFE minimization failed at step {k_step}: {e}")
@@ -892,7 +915,7 @@ def compute_objective(trial_data: dict,
 
 
 # =============================================================================
-# EVALUATE_CANDIDATE — MARXEFE wrapper, BO-aligned metrics schema
+# EVALUATE_CANDIDATE
 # =============================================================================
 
 def evaluate_candidate(params_np, target_forward_position, robot_mass,
@@ -1006,15 +1029,15 @@ def marxefe_optimize_cpg(bounds: torch.Tensor,
          _,
          joint_IDs_full,
          filtered_joint_IDs,
-         feet_joint_IDs) = load_robot(p)
-        print(f"\n✅ Environment initialized with robot ID: {quadruped}")
+         feet_joint_IDs) = load_robot(p, robot_mass=robot_mass)
+        print(f"\n✅ Environment initialized with robot ID: {quadruped} (mass={robot_mass} kg)")
 
     # MARXEFE agent (internal objective unchanged)
     Mu  = 2
-    My  = 3
+    My  = 4
     Dy  = 4   # observation dim: pos_x, pos_y, pitch, roll
     Du  = 8
-    len_horizon = 3
+    len_horizon = 5
 
     Nu0     = 20.0
     Omega0  = 1e0 * np.diag(np.ones(Dy))

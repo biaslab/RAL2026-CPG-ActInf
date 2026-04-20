@@ -218,7 +218,7 @@ def load_environment(dt, use_gui=USE_GUI):
     return p
 
 
-def load_robot(p):
+def load_robot(p, robot_mass=10.0):
     """Load Laikago robot and configure collision filtering."""
     start_position = [0.0, 0.0, 0.55]
     start_orientation = [0.0, 0.5, 0.5, 0.0]
@@ -226,7 +226,7 @@ def load_robot(p):
     use_rack = False
 
     quadruped = p.loadURDF("laikago/laikago_toes.urdf", start_position, start_orientation, flags=urdfFlags, useFixedBase=use_rack)
-    p.changeDynamics(quadruped, -1, mass=10.0)
+    p.changeDynamics(quadruped, -1, mass=float(robot_mass))
 
     n_joints = p.getNumJoints(quadruped)
     joints_info = {}
@@ -293,15 +293,16 @@ _prev_params = None
 
 def run_cpg_trial(params: np.ndarray,
                   target_forward_position: float,
-                  context_mode: str = "flat") -> dict:
+                  context_mode: str = "flat",
+                  robot_mass: float = 10.0) -> dict:
     """Run a single CPG-controlled locomotion trial with MARXEFE-style reset."""
     global _prev_params, quadruped
 
     if quadruped is None:
         dt = 0.01
         load_environment(dt)
-        quadruped, _, _, _, _ = load_robot(p)
-        print(f"[run_cpg_trial] Initialized environment with robot ID: {quadruped}")
+        quadruped, _, _, _, _ = load_robot(p, robot_mass=robot_mass)
+        print(f"[run_cpg_trial] Initialized environment with robot ID: {quadruped} (mass={robot_mass} kg)")
 
     # Unpack parameters
     coupling_gain = params[0]
@@ -746,7 +747,7 @@ def evaluate_candidate(params_np, target_forward_position, robot_mass, optimizer
     """Evaluate candidate parameters and return standardized metrics."""
     sim_start = time.time()
 
-    trial_data = run_cpg_trial(params_np, target_forward_position, context_mode="flat")
+    trial_data = run_cpg_trial(params_np, target_forward_position, context_mode="flat", robot_mass=robot_mass)
     sim_time_sec = time.time() - sim_start
 
     J = compute_objective(trial_data, target_forward_position, robot_mass)
@@ -872,8 +873,8 @@ def bo_optimize_cpg(
     if quadruped is None:
         dt = 0.01
         load_environment(dt)
-        quadruped, _, _, _, _ = load_robot(p)
-        print(f"\n✅ Environment initialized with robot ID: {quadruped}")
+        quadruped, _, _, _, _ = load_robot(p, robot_mass=robot_mass)
+        print(f"\n✅ Environment initialized with robot ID: {quadruped} (mass={robot_mass} kg)")
 
     schedule = BetaSchedule(
         beta_init=beta_init,

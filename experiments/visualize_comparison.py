@@ -93,10 +93,24 @@ def save_fig(fname):
     plt.close()
 
 
+def robust_ylim(runs, y_col, lo_pct=1, hi_pct=99, pad_frac=0.1):
+    """Return (ymin, ymax) clipped to [lo_pct, hi_pct] percentiles across all runs."""
+    all_y = np.concatenate([df[y_col].values for df in runs.values()])
+    all_y = all_y[np.isfinite(all_y)]
+    if all_y.size == 0:
+        return None
+    lo, hi = np.percentile(all_y, [lo_pct, hi_pct])
+    pad = pad_frac * (hi - lo) if hi > lo else max(abs(hi) * pad_frac, 1.0)
+    return lo - pad, hi + pad
+
+
 def plot_metric(runs, x_col, x_label, y_col, y_label, title, fname):
     plt.figure(figsize=(10, 6))
     for label, df in runs.items():
         plt.plot(df[x_col], df[y_col], "o-", label=label)
+    ylim = robust_ylim(runs, y_col)
+    if ylim is not None:
+        plt.ylim(*ylim)
     plt.xlabel(x_label)
     plt.ylabel(y_label)
     plt.title(title)
