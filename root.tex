@@ -348,26 +348,82 @@ The autoregression coefficient matrix $\Lambda_k$, of size $D_x \times D_x$, has
 
 \section{EXPERIMENTS}
 
-\subsection{Experiment 1: no feedback}
+We evaluate three parameter-selection strategies for the Hopf-oscillator CPG controller on the Laikago quadruped in PyBullet: (i) an offline \emph{grid search} over a small set of CPG parameters; (ii) online \emph{Bayesian optimization} (BO) with a Gaussian-process surrogate and a UCB acquisition function; and (iii) the proposed \emph{MARX-EFE} active inference agent, which continually updates CPG parameters by minimising expected free energy. Grid search serves as a fixed, non-adaptive reference point, BO serves as a state-of-the-art black-box optimizer, and MARX-EFE is the proposed continual learning agent.
 
-We first run a series of experiments where the CPG does not receive feedback from contact sensors in its feet. It is essentially an open-loop controller; even though it has a limit cycle that it will eventually return to, mis-steps may take a while to correct. 
+All three methods optimize in the same 8-dimensional parameter space with identical bounds:
+\begin{align*}
+    \theta = [\gamma, \omega_{\mathrm{swing}}, \omega_{\mathrm{stance}}, F_{\mathrm{fast}}, K_{\mathrm{stop}}, A_{\mathrm{hip}}, A_{\mathrm{knee}}, b]\,,
+\end{align*}
+corresponding to the coupling gain, the two phase-dependent frequencies, the Righetti-style fast-contact gain, the stop-gain, the hip and knee amplitudes, and the sigmoid sharpness $b$ from Eq.~\ref{Equation 3}. Each trial is a $T=4.5$\,s episode of simulated walking on flat ground with $\Delta t = 0.01$\,s, a $1.5$\,s settling window excluded from the metrics, and a target forward velocity of $1.0$\,m/s. Parameter updates occur \emph{online}: every trial carries the CPG state forward and smoothly interpolates between the previous and new parameters over the first $150$ steps.
 
-\paragraph{Baselines}
-We shall compare a simple baseline, referred to as \emph{FIX}, with 2 state-of-the-art reinforcement learning agents, \emph{DDPG} and \emph{PILCO}, and our experimental agent, referred to as \emph{MARX-EFE}.
+\paragraph{Performance metrics}
+We score each method on four quantities computed over the $3.0$\,s steady-state window: the scalar objective
+\begin{align} \label{eq:obj}
+    J = w_1\,R_v - w_2\,\mathrm{CoT} - w_3\,\mathcal{S}\,,
+\end{align}
+with velocity reward $R_v = \frac{1}{T}\sum_k \exp(-\|v_k-v^{*}\|^2/\sigma_v^2)$, cost of transport $\mathrm{CoT}=\int P_{\mathrm{mech}}\,\mathrm{d}t / (m g d)$, and combined RMS stability $\mathcal{S}=\sqrt{\mathrm{RMS}(\gamma^r)^2+\mathrm{RMS}(\gamma^p)^2}$; the forward distance $d_y$; the lateral drift $|d_x|$; and the fall rate. To compare sample efficiency, we report the number of trials $N_{\mathrm{walk}}$ required to reach $J\ge J_{\mathrm{th}}$ with cumulative fall rate below $r_{\mathrm{th}}$, and the cumulative forward distance $D_{\mathrm{cum}}$ accumulated over the optimization horizon.
 
-We measure three different performance metrics: distance covered, average fall rate, and approximate time to converge.
+\subsection{Experiment 1: Comparison of optimization strategies}
+\label{sec:exp1-comparison}
 
+In this experiment we compare grid search, BO, and MARX-EFE on flat terrain with a fixed target velocity of $1.0$\,m/s. Grid search is run offline on a restricted $(\alpha,\beta,b)$ sub-grid with the remaining parameters fixed, producing a ranking of static configurations. BO and MARX-EFE are run for $100$ online trials, each repeated over $5$ random seeds. For BO we use UCB with a decaying schedule $\beta_t = \max(\beta_{\min}, \beta_0\,\gamma^{t-t_0})$ and standardized outputs; for MARX-EFE we use a matrix-normal--Wishart prior over the 8D parameter regression coefficients and infer a new parameter vector every $50$ simulation steps by minimizing the EFE of Eq.~\ref{eq:total-MAP} with an $L^2$ effort regularizer.
 
-figure 1: distance covered
-figure 2: fall rate
-figure 3: phases of exploration / exploitation (MARXEFE vs DDPG)
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\linewidth]{figures/exp1_objective_vs_trial.pdf}
+    \framebox[\linewidth]{\rule{0pt}{3.5cm}\textit{placeholder: $J$ vs.\ trial, mean $\pm$ s.d.\ over seeds}}
+    \caption{Learning curves on flat terrain. Objective $J$ (Eq.~\ref{eq:obj}) as a function of trial index, comparing grid search (horizontal baseline at best grid configuration), Bayesian optimization, and MARX-EFE.}
+    \label{fig:exp1-J-vs-trial}
+\end{figure}
 
-figure 4: rate of learning vs number of params
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\linewidth]{figures/exp1_fallrate_and_dcum.pdf}
+    \framebox[\linewidth]{\rule{0pt}{3.5cm}\textit{placeholder: cumulative fall rate and $D_{\mathrm{cum}}$}}
+    \caption{Safety and efficiency. (Left) cumulative fall rate vs.\ trial index; (right) cumulative forward distance $D_{\mathrm{cum}}$ walked across all trials, a measure of sample-efficient exploration.}
+    \label{fig:exp1-safety}
+\end{figure}
 
-\subsection{With foot contact feedback}
+\begin{table}[h]
+    \centering
+    \caption{Experiment 1 summary (mean $\pm$ s.d.\ over $5$ seeds).}
+    \label{tab:exp1}
+    \begin{tabular}{lccc}
+        \hline
+        Method & $N_{\mathrm{walk}}$ & $D_{\mathrm{cum}}$ [m] & fall rate \\
+        \hline
+        Grid search & -- & -- & -- \\
+        Bayesian optimization & -- & -- & -- \\
+        MARX-EFE & -- & -- & -- \\
+        \hline
+    \end{tabular}
+\end{table}
 
-Figure 1: compare no, mode 2, mode2+agent
+\subsection{Experiment 2: Sensitivity to exploration schedule}
+\label{sec:exp2-beta}
 
+A known failure mode of BO is that its behaviour depends strongly on the acquisition-function exploration schedule. We sweep five $\beta_t$ schedules (\texttt{conservative}, \texttt{moderate}, \texttt{balanced}, \texttt{late\_decay}, \texttt{exploratory}) while holding all other BO settings fixed, and compare them against a single MARX-EFE run. The purpose is to show (a) that BO requires schedule tuning to achieve competitive sample efficiency, and (b) that MARX-EFE does not require such a schedule because the exploration--exploitation trade-off is implicit in the epistemic term of the expected free energy.
+
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\linewidth]{figures/exp2_beta_sweep.pdf}
+    \framebox[\linewidth]{\rule{0pt}{3.5cm}\textit{placeholder: bar chart of $N_{\mathrm{walk}}$ per $\beta$-schedule}}
+    \caption{BO sensitivity to the UCB $\beta_t$ schedule. $N_{\mathrm{walk}}$ (lower is better) for each schedule, versus the MARX-EFE reference.}
+    \label{fig:exp2-beta-sweep}
+\end{figure}
+
+\subsection{Experiment 3: Online adaptation to target-velocity changes}
+\label{sec:exp3-adaptation}
+
+A key claim of the continually-learning agent is that it can adapt online to non-stationary tasks without re-tuning. We change the target velocity $v^{*}$ mid-episode from $0.5$\,m/s to $1.0$\,m/s to $0.8$\,m/s, and measure how quickly each method tracks the new set-point. Only methods that update their parameters online (BO and MARX-EFE) are evaluated here.
+
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\linewidth]{figures/exp3_targetvel_change.pdf}
+    \framebox[\linewidth]{\rule{0pt}{3.5cm}\textit{placeholder: $v_x(t)$ with target-velocity step changes}}
+    \caption{Online target-velocity tracking. Realised forward velocity $v_x(t)$ under a step change in $v^{*}$; BO and MARX-EFE shown separately.}
+    \label{fig:exp3-targetvel}
+\end{figure}
 
 
 \section{DISCUSSION}
