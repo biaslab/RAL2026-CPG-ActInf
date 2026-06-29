@@ -30,6 +30,7 @@ from botorch.optim import optimize_acqf
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from methods.cpg_bounds import bounds, bounds_lower, bounds_upper
+from methods import terrain
 
 
 # ============================================================================
@@ -214,7 +215,7 @@ def load_environment(dt, use_gui=USE_GUI):
     p.setGravity(0, 0, -9.8)
     p.setTimeStep(dt)
     p.setRealTimeSimulation(0)
-    p.loadURDF("plane.urdf")
+    terrain.build_ground(p)   # body 0; flat (plane.urdf) by default
     return p
 
 
@@ -558,6 +559,10 @@ def run_cpg_trial(params: np.ndarray,
             p.setJointMotorControl2(quadruped, hip_joint, p.POSITION_CONTROL, hip_angle)
             p.setJointMotorControl2(quadruped, knee_joint, p.POSITION_CONTROL, knee_angle)
 
+        # Spatially-varying friction: set the ground friction from the robot's
+        # current forward position (no-op unless this is a friction terrain).
+        terrain.apply_dynamic_friction(
+            p, quadruped, p.getBasePositionAndOrientation(quadruped)[0][1])
         p.stepSimulation()
 
         # Logging
@@ -714,7 +719,7 @@ def compute_objective(trial_data: dict,
 
     # Cost of Transport
     w2 = 0.4
-    delta_t = 0.02
+    delta_t = 0.01   # must match the simulator timestep (p.setTimeStep(0.01))
     mechanical_power = np.sum(np.abs(torques_steady * qdot_steady)) * delta_t
     d = base_pos_steady[-1, 1] - base_pos_steady[0, 1]
     if d < 0.5:
