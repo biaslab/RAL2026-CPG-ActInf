@@ -109,248 +109,142 @@ In the following, we contribute to the field with
 
 
 \section{PROBLEM STATEMENT}
+\label{sec:problem-statement}
 
+\begin{figure*}[tb]
+  \centering
+  \includegraphics[width=\textwidth]{fig1_adaptation_urgency}
+  \caption{Terrain change creates adaptation urgency (schematic).
+  \textbf{(a)}~The performance landscape $J(\theta,\tau)$ shifts when the terrain changes from $\tau$ (solid) to $\tau’$ (dashed). Parameters optimal for $\tau$ lie in a suboptimal region for $\tau’$, creating a parameter mismatch~$\delta_k$.
+  \textbf{(b)}~Without rapid adaptation the mismatch initiates a positive feedback loop that degrades locomotion quality below the fall threshold before the adaptation deadline $T_{\mathrm{dead}}$. A fast continual learning agent (green, solid) converges within a few trials; a slow optimizer (blue, dashed) does not recover in time; an agent with fixed parameters (grey, dotted) degrades monotonically.}
+  \label{fig:adaptation_urgency}
+\end{figure*}
 
-The Petoi Bittle quadruped robot should execute a stable forward walk without falling. The robot has four legs, each with two joints controlled by servomotors: a hip joint $v_i(t)$ and a knee joint $w_i(t)$ for leg $i = 1,\dots,4$. At each discrete time step $k$, with fixed sampling interval $\Delta t$, the pose of the robot’s base is described by its linear position $\mathbf{q}_k = (q^x_k, q^y_k, q^z_k)$ and its orientation in Euler angles $\boldsymbol{\gamma}_k = (\gamma^p_k, \gamma^r_k, \gamma^y_k)$, where $q^x_k$ is the forward displacement along the $x$–axis, $q^y_k$ and $q^z_k$ represent lateral and vertical displacements, and $\gamma^p_k$, $\gamma^r_k$, and $\gamma^y_k$ denote pitch, roll, and yaw angles, respectively. Joint trajectories $v_i(t)$, $w_i(t)$ are subject to two performance criteria. First, forward progression must meet a minimum target distance $D_{\text{target}}$ over a time $T = \frac{N}{\Delta t}$, where $N$ is the number of time steps, such that $q^x_T \ge D_{\text{target}}$. Simultaneously, the robot must maintain stability, which means that lateral and vertical deviations, as well as orientation errors, remain negligible: $|q^y_k| \approx 0$, $|q^z_k - H| \approx 0$, and $|\gamma^p_k| \approx 0$, $|\gamma^r_k| \approx 0$, $|\gamma^y_k| \approx 0$, where $H$ is the nominal body height. 
+\paragraph{Locomotion task}
+Consider a quadruped robot navigating terrain with condition $\tau$ (characterised, for instance, by surface friction $\mu_s$ or slope angle $\phi$). The robot has four legs, each with two joints driven by servomotors: a hip angle $\phi_i^h(t)$ and a knee angle $\phi_i^k(t)$ for leg $i = 1,\ldots,4$. At discrete time step $k$ with sampling interval $\Delta t$, the base pose is described by its position $\mathbf{q}_k = (q^x_k, q^y_k, q^z_k)$ and Euler angles $\boldsymbol{\gamma}_k = (\gamma^p_k, \gamma^r_k, \gamma^y_k)$ for pitch, roll, and yaw, respectively. We measure locomotion quality by the scalar objective $J(\theta, \tau)$ (defined in Sec.~\ref{sec:experiments}), which depends on both the CPG parameter vector $\theta \in \mathbb{R}^8$ and the terrain $\tau$. A fall is declared if $q^z_k < h_{\min}$ or $|\gamma^r_k| > \gamma_{\max}$ at any time step, where $h_{\min}$ and $\gamma_{\max}$ are safety thresholds.
 
-Second, the CPG must exhibit stable limit–cycle behavior so that transient perturbations are rapidly attenuated and do not lead to falls. A fall is declared if $q^z_k < h_{\min}$ or $|\gamma^r_k| > \gamma_{\max}$ at any time step, where $h_{\min}$ and $\gamma_{\max}$ are safety thresholds.
+\paragraph{Terrain-dependent optimal parameters}
+For a given terrain $\tau$ there exists an optimal CPG parameter vector
+\begin{align}
+    \theta^*(\tau) = \arg\max_{\theta} \, \mathbb{E}\big[J(\theta, \tau)\big] \,,
+    \label{eq:optimal-params}
+\end{align}
+where the expectation is over the stochastic outcomes of a locomotion trial. Critically, the performance landscape $J(\theta,\tau)$ shifts when the terrain changes: parameters tuned for flat ground become suboptimal on a slope or a slippery surface (Fig.~\ref{fig:adaptation_urgency}a). A terrain change $\tau \to \tau’$ therefore immediately induces a \emph{parameter mismatch}
+\begin{align}
+    \delta_k = \theta_k - \theta^*(\tau’) \,,
+    \label{eq:mismatch}
+\end{align}
+between the robot’s current parameters $\theta_k$ and the new terrain optimum.
 
-From a control perspective, the Hopf oscillator network should allow independent modulation of the descending (stance) and ascending (swing) phases, reflecting the asymmetric nature of animal locomotion \cite{dickinson2000how}. In fact, in stable quadrupedal gaits, the stance phase typically occupies a longer duration than the swing phase. It should also allow smooth adjustment of amplitude and frequency via simple parameter changes and strong coupling with the robot’s mechanics. The overall architecture must remain generic enough to accommodate different quadruped robots and to allow future integration of higher–level command signals.
+\paragraph{The positive feedback cycle}
+The mismatch $\delta_k$ does not merely inflict a static performance penalty---it initiates a positive feedback loop that, if left uncontrolled, accelerates toward an irreversible fall (Fig.~\ref{fig:adaptation_urgency}b):
+%
+\begin{enumerate}
+    \item \emph{Mismatch $\to$ gait error.} Suboptimal CPG parameters produce joint trajectories that deviate from the nominal limit-cycle shape, generating a body-pose error~$e_k$.
+    \item \emph{Gait error $\to$ body perturbation.} Imperfect foot placement excites roll and pitch deviations in $\boldsymbol{\gamma}_k$, which grow with the magnitude of the deviation.
+    \item \emph{Body perturbation $\to$ CPG disturbance.} Large orientation excursions corrupt the sensory feedback driving the oscillator network and pull the CPG state off its limit-cycle attractor.
+    \item \emph{CPG disturbance $\to$ larger gait error.} As the CPG drifts from its attractor, joint trajectories become increasingly erratic, amplifying~$e_k$ and closing the loop.
+\end{enumerate}
+%
+The escalation rate grows with $|\delta_k|$, so that a recoverable suboptimality can quickly become an irreversible fall. This introduces an \emph{adaptation deadline}~$T_{\mathrm{dead}}$: the number of trials within which the agent must drive $\delta_k \approx 0$ before the fall thresholds $h_{\min}$, $\gamma_{\max}$ are breached.
+
+\paragraph{Design criterion}
+The CPG controller must exhibit stable limit-cycle behaviour, allow independent stance and swing modulation \cite{dickinson2000how}, and expose a low-dimensional, continuously adjustable parameter vector $\theta$ that can be updated online after each locomotion trial. Most importantly, the adaptation agent must converge to $\theta^*(\tau’)$ within $O(\text{few})$ trials---before the positive feedback cycle leads to a fall.
 
 
 \section{METHODS}
 
 \subsection{Central Pattern Generator}
 
-The CPGs are modeled as a network of four mutually coupled Hopf oscillators, each driving one limb: left front (LF), right front (RF) left hind (LH) and right hind (RH). The coordination between limbs arises from inhibitory coupling. 
-% The coupling network is shown in Figure \ref{fig: Coupling network}, where each oscillator modulates the phase of its neighbors to generate specific gaits \cite{righetti2008pattern,PassiveCompliant2008}. 
-For instance, for the trot gait, oscillator 1 (LF) is excited by 4 (RH) \(k_{14} = +1\), while 2 (RF) and 3 (LH) inhibit 1 (LF), as \(k_{12} = -1\) and \(k_{13} = -1\). 
-
-Each oscillator is governed by a modified Hopf model. It allows phase-dependent frequency modulation and enables independent control over stance and swing durations.
-The state of each oscillator \((x_i, y_i)\) depends on the following set of equations:
+The CPGs are modeled as a network of four mutually coupled Hopf oscillators, each driving one limb: left front (LF), right front (RF), left hind (LH), and right hind (RH). Coordination between limbs arises from inhibitory coupling through a gait-specific coupling matrix $K = [k_{ij}]$.
+Each oscillator evolves as:
 \begin{align}
   \dot{x}_i &= \alpha\,(u - r_i^2)\,x_i - \omega_i\,y_i, \\
-  \dot{y}_i &= \beta\,(u - r_i^2)\,y_i + \omega_i\,x_i 
+  \dot{y}_i &= \beta\,(u - r_i^2)\,y_i + \omega_i\,x_i
                + \gamma \sum_{j=1}^4 k_{ij}\,y_j, \\
   \omega_i &= \frac{\omega_{\mathrm{stance}}}{1 + e^{-b\,y_i}}
             + \frac{\omega_{\mathrm{swing}}}{1 + e^{\,b\,y_i}},
     \label{Equation 3}
 \end{align}
-where $r_i = \sqrt{x_i^2 + y_i^2}$ is the instantaneous amplitude, $u$ defines the squared amplitude of the limit cycle, and $\alpha, \beta > 0$ are convergence rates (typically $\beta \gg \alpha$ to enforce stronger convergence along the $y$-axis). The term $\omega_i$ transitions between the stance and swing frequencies depending on the phase $y_i$, and $\gamma$ is the coupling gain added to have stronger coupling and less dependency on the initial conditions settings. The sigmoid functions in Equation \ref{Equation 3} ensure smooth and continuous transition between the stance and swing frequencies. A sigmoid is an S-shaped mathematical function that smoothly interpolates between two values; in this context, it gradually shifts the oscillator’s frequency based on the sign and magnitude of $y_i$. the parameter $b$ sets the sharpness between this transition. This allows the oscillator to gradually change between the swing and the stance phases according to the sign and magnitude of $y_i$. 
-The coupling matrix $K = [k_{ij}]$ is gait-specific.
-
-
-% Different gaits emerge from the choice of the coupling matrix. Figure~\ref{fig:coupling_matrices} illustrates the matrices for trot, pace, bound, and walk, each defining a distinct set of stable phase relationships.
-%
-%
-Figure \ref{fig:CPGoutputs}  shows the time evolution of the outputs from the Hopf CPG model and the joint angles for the walking gait simulation. The CPGs demonstrate the expected sinusoidal movement for each leg. Figure~\ref{fig:hopf_limit_cycle} shows the limit cycle behavior of the CPG, where the state variables \( x_i \) and \( y_i \) converge to a circular trajectory of radius \( \sqrt{\mu} \) and closely follow this limit cycle over time. This demonstrates the oscillator's stability and periodicity, which are critical for generating smooth, consistent joint trajectories necessary for coordinated legged locomotion.
-
-% \begin{figure}[h]
-%   \centering
-% \includegraphics[width=1\linewidth]{Image/Hopf_oscillators_plot.png}
-%   \caption{Time series $x_i$ and $y_i$ for a walking pattern.}
-%   \label{fig:CPGoutputs}
-% \end{figure}
-
-% \begin{figure}[htbp]
-%     \centering
-%     \includegraphics[width=0.4\textwidth]{Image/Hopf_limitcycle_plot.png}
-%     \caption{Limit cycle behavior of Hopf oscillators.}
-%     \label{fig:hopf_limit_cycle}
-% \end{figure}
-
+where $r_i = \sqrt{x_i^2 + y_i^2}$, $u$ sets the squared limit-cycle amplitude, $\alpha, \beta > 0$ are convergence rates, $\gamma$ is the coupling gain, and $b$ controls the sharpness of the frequency transition between stance and swing phases.
 
 \subsection{Mapping to Joint Angles}
-The output from the Hopf CPG model, represented by the variables \(x_i\) and \(y_i\), is mapped to the robot's joint angles, determining how the simulated CPG behavior translates into actual limb movement. Specifically, the hip and knee joint angles for each leg are computed as follows:
+
+The CPG outputs $(x_i, y_i)$ are mapped to hip and knee joint angles:
 \begin{align}
-\theta_{\text{hip}} &= \theta_{\text{hip base}} + \theta_{\text{hip range}} \cdot x_i \\
-\theta_{\text{knee}} &= \theta_{\text{knee base}} - \theta_{\text{knee range}} \cdot \max(0, y_i)
+\theta_{\text{hip}} &= \theta_{\text{hip base}} + \theta_{\text{hip range}} \cdot x_i , \\
+\theta_{\text{knee}} &= \theta_{\text{knee base}} - \theta_{\text{knee range}} \cdot \max(0, y_i) ,
 \end{align}
+where $x_i$ drives forward-backward hip swing and $y_i$ controls knee flexion; negative $y_i$ is suppressed to prevent hyperextension.
 
-Here, \(x_i\) modulates the hip motion, corresponding to the forward-backward swing of the leg, while \(y_i\) controls knee flexion during the swing phase. Negative values of \(y_i\) are suppressed to prevent unnatural hyperextension. This mapping transforms the original circular limit cycle into a biologically inspired trajectory for the foot, more closely resembling the natural gait cycle observed in animals. It allows the robot to generate plausible leg trajectories that contribute to effective and natural locomotion.
+\subsection{Autoregressive Active Inference Agent}
 
-\subsection{Autoregressive Active Inference agent}
+The agent is based on a multivariate autoregressive model with exogenous inputs (MARX) \cite{nisslbeck2024coupled}. It maintains a belief over dynamics parameters updated from observations, and selects controls by minimising an Expected Free Energy (EFE) objective over a planning horizon.
 
-The agent is is based on a multivariate autoregressive model with exogenous inputs \cite{nissl}
+\subsubsection{Model}
 
-At the core of the model is a vector autoregressive process with a regression coefficient matrix \mbox{$A \in \mathbb{R}^{D_x \times D_y}$} and a noise precision matrix \mbox{$W \in \mathbb{R}_{+}^{\, D_y \times D_y}$} where $\mathbb{R}_{+}$ refers to the space of positive semi-definite matrices. Let $\Theta = (A,W)$ refer to the parameters jointly. The autoregressive model forms our likelihood function:
+The likelihood is a Gaussian autoregression with coefficient matrix $A \in \mathbb{R}^{D_x \times D_y}$ and noise precision $W \in \mathbb{R}_{+}^{D_y \times D_y}$. Denoting $\Theta = (A, W)$:
 \begin{align} \label{eq:likelihood}
-    p(y_k \given \Theta, u_k, \bar{u}_k, \bar{y}_k) = \mathcal{N}\big(y_k \given A^{\intercal} x_k, W^{-1} \big) \, ,
+    p(y_k \given \Theta, u_k, \bar{u}_k, \bar{y}_k) = \mathcal{N}\big(y_k \given A^{\intercal} x_k, W^{-1} \big) ,
 \end{align}
-where $\bar{u}_k, \bar{y}_k$ are running memories of previous inputs and outputs, respectively, and $x_k$ is the concatenation of the current control and the memories:
+where $\bar{u}_k$ and $\bar{y}_k$ are running memories of the $M_u$ previous inputs and $M_y$ previous outputs, and the regressor concatenates the current control with the memories:
 \begin{align}
-    \bar{u}_k = \begin{bmatrix} u_{k-1} \\ \vdots \\ u_{k-{M_u}} \end{bmatrix} \, , \ \ \bar{y}_k = \begin{bmatrix} y_{k-1} \\ \vdots \\ y_{k-{M_y}} \end{bmatrix} \, , \ \ x_k = \begin{bmatrix} u_k \\ \bar{u}_k \\ \bar{y}_k \end{bmatrix} . 
+    x_k = \begin{bmatrix} u_k \\ \bar{u}_k \\ \bar{y}_k \end{bmatrix} , \qquad D_x = D_u(M_u+1) + D_y M_y .
 \end{align}
-The vector $x_k$ is of dimension $D_x = D_u (M_u + 1) + D_y M_y$. 
-Note that although the memories are indexed with time $k$, they do not contain the current input $u_k$ and output $y_k$, only the previous inputs and outputs.
-\tim{Maybe we could introduce $\mathcal{D}_k$ already here due to its close connection to $x_k$? Or is it better to only introduce variables right after/before they are used for the first time? If so, we could actually introduce the prior as $p(\Theta \given \mathcal{D}_{k-1})$ instead of $p(\Theta)$ where $p(\Theta \given \mathcal{D}_0)$ is the ''initial'' prior?}
-
-The prior distribution on the parameters is a matrix normal Wishart distribution \cite[ID: P323]{Soch}:
+The prior over parameters is a matrix-normal-Wishart (MNW) distribution \cite[ID: P323]{Soch}:
 \begin{align} \label{eq:priors}
-    p(\Theta) &= p(A \given W) p(W) \\
-    % \! \mathcal{MNW}\big(A, W \given M_0, \Lambda_0^{-1}, \Omega_0^{-1}, \nu_0 \big) \\
-    &= \! \mathcal{MN}\big(A \given M_0, \Lambda_0^{-1}, W^{-1} \big) \, \mathcal{W}\big(W \given \Omega_0^{-1}, \nu_0 \big) .
+    p(\Theta) = \mathcal{MN}\!\big(A \given M_0, \Lambda_0^{-1}, W^{-1} \big) \, \mathcal{W}\!\big(W \given \Omega_0^{-1}, \nu_0 \big) .
 \end{align}
-\tim{Do we actually need to provide the functional form of the matrix normal and Wishart distributions in the main text? We keep most of the distributions in the main text a level above the functional form, so why not also put the functional forms for our prior into the supplementary? I.e. skip the next two equations?}
-The matrix normal distribution for the coefficients is
+Controls are given an independent Gaussian prior for regularisation, with precision $\Upsilon$:
 \begin{align}
-    &\mathcal{MN}(A \given M_0, \Lambda_0^{-1}, W^{-1} \big) = \\
-    &\quad \sqrt{\frac{|W|^{D_x} |\Lambda_0|^{D_y }}{(2\pi)^{D_x D_y}}} \exp \big( \! - \! \frac{1}{2}\tr\big[W (A \! - \! M_0)^{\intercal} \Lambda_0 (A \! - \! M_0 ) \big] \big) , \nonumber
+    p(u_k) = \cN(u_k \given 0, \Upsilon^{-1}) . \label{eq:control-prior}
 \end{align}
-and the Wishart distribution for the noise precision matrix is
-\begin{align}
-    & \mathcal{W}\big(W \given \Omega_0^{-1}, \nu_0 \big) = \\ 
-    &\qquad \ \sqrt{\frac{|\Omega_0|^{\nu_0}}{2^{\nu_0 D_y}}} \frac{\sqrt{|W|^{\nu_0 - D_y - 1}}}{\Gamma_{D_y}(\nu_0 / 2)} \exp\big(- \frac{1}{2}\tr\big[W \Omega_0\big] \big) . \nonumber
-\end{align}
-%
-%
-The prior distributions over control inputs are assumed to be independent over time:
-\begin{align}
-    p(u_k) = \cN(u_k \given 0, \Upsilon^{-1}) \label{eq:control-prior} \, ,
-\end{align}
-with precision matrix $\Upsilon$. This choice has a regularizing effect on the inferred controls (Sec.~\ref{sec:fe-controls}). 
-%
-Finally, we have a probability distribution indicating the target observation for the system to reach;
+The target observation is encoded as a Gaussian goal prior:
 \begin{align} \label{eq:goalp}
     p(y_t \given y_{*}) = \mathcal{N}(y_t \given m_{*}, S_{*}) .
 \end{align}
-Note that $y_{*}$ refers to the goal prior parameters, $m_{*},S_{*}$. A goal prior is a richer distribution of a target than a numerical set-point: it allows one to indicate, for instance, that the agent's task is complete when it has reached an area of high probability mass.
 
-\subsubsection{Inference}
-Our inference procedure is separated into a parameter belief update procedure given observed data, and a control estimation procedure given planned trajectories.
+\subsubsection{Parameter Estimation}
 
-\paragraph{Parameters}
-Given observed $y_k$ and $u_k$, we update our parameter belief through Bayesian filtering \cite{sarkka2013bayesian}:
-\begin{align} \label{eq:bayesian-filtering}
-    \underbrace{p\big(\Theta \given \mathcal{D}_{k} \big)}_{\text{posterior}} \! = \! \frac{\overbrace{p\big(y_k \given \Theta, u_k, \bar{u}_k, \bar{y}_k \big)}^{\text{likelihood}}}{\underbrace{p\big(y_{k} \given u_{k}, \mathcal{D}_{k\-1}\big)}_{\text{evidence}}} \! \underbrace{p\big(\Theta \given \mathcal{D}_{k\-1}\big)}_{\text{prior}} . 
-\end{align}
-where $\mathcal{D}_k = \{y_i, u_i\}_{i=1}^{k}$ is short-hand for data up to time $k$. Note that the memories $\bar{u}_k, \bar{y}_k$ are subsets of $\mathcal{D}_{k-1}$. The evidence term is the evaluation of the observation $y_k$ under the predictive distribution, obtained by marginalizing the likelihood over the parameters.
-
-Marginalizing the Gaussian likelihood in Eq.~\ref{eq:likelihood}) over a matrix normal Wishart distribution (Eq.~\ref{eq:priors}), with parameters $M_{k-1}$, $\Lambda_{k-1}$, $\Omega_{k-1}$ and $\nu_{k-1}$, yields a multivariate location-scale T-distribution:
-\begin{align} 
-    p(y_k \given u_k, \mathcal{D}_{k\-1}) 
-    % &= \int p(y_k \given \Theta, u_k, \bar{u}_k, \bar{y}_k) p(\Theta \given \mathcal{D}_{k\-1}) \, \mathrm{d}\Theta \nonumber \\
-    % &= \iint \! \cN(y_k \given A^{\intercal} x_k, W^{\-1}) \mathcal{MN}\big(A \given M_0, \Lambda_0^{-1}, W^{-1} \big) \\
-    % &\qquad  \qquad \, \mathcal{W}\big(W \given \Omega_0^{-1}, \nu_0 \big) \mathrm{d} A \mathrm{d} W \nonumber \\
-    &=  \mathcal{T}_{\eta_k} \Big(y_k \given \mu_k(u_k), \Sigma_k(u_k) \Big) \, , \label{eq:postpred}
-\end{align}
-whose parameters are $\eta_k = \nu_{k-1} - D_y + 1$,
-\begin{align}
-\mu_k(u_k) &= M_{k-1}^{\intercal} \begin{bmatrix} u_k \\ \bar{u}_k \\ \bar{y}_k \end{bmatrix} \\
-\Sigma_k(u_k) &= \frac{1}{\nu_{k\-1} \! - \! D_y \! + \! 1} \Omega_{k\-1} \Big(1 + \begin{bmatrix} u_k \\ \bar{u}_k \\ \bar{y}_k \end{bmatrix}^{\intercal} \Lambda_{k\-1}^{-1} \begin{bmatrix} u_k \\ \bar{u}_k \\ \bar{y}_k \end{bmatrix} \Big) .
-\end{align}
-% $2\alpha_k$ refers to the degrees of freedom parameter.     
-The proof is in Appendix~\ref{app:proof:marginal-likelihood}. Note that the parameters of the predictive distribution are functions of the control $u_k$.
-
-The posterior distribution over the parameters $\Theta$ (Eq.~\ref{eq:priors}) 
-% \begin{align}
-%     p(A, W \given \mathcal{D}_{k\-1}) = \mathcal{MNW}(A,W \given M_{k\-1}, \Lambda_{k\-1}^{-1}, \Omega^{-1}_{k\-1}, \nu_{k\-1}) \, ,
-% \end{align}
-is proportional to a matrix normal Wishart posterior distribution:
-\begin{align} \label{eq:truepost}
-    p(\Theta \given \mathcal{D}_k)  =  \mathcal{MNW}(A, W \given M_k, \Lambda^{-1}_k, \Omega^{-1}_k, \nu_k) \, .
-\end{align}
-The parameters of this distribution are
+Because the MNW distribution is conjugate to the Gaussian likelihood, Bayesian filtering yields a closed-form MNW posterior $p(\Theta \given \mathcal{D}_k) = \mathcal{MNW}(A, W \given M_k, \Lambda^{-1}_k, \Omega^{-1}_k, \nu_k)$ at each step $k$, where $\mathcal{D}_k = \{y_i, u_i\}_{i=1}^{k}$. The parameters are updated by rank-one corrections:
 \begin{align} \label{eq:postparams}
-\nu_k
-&= \nu_{k\-1} + 1 , \\
-\Lambda_k
-&= \Lambda_{k\-1} + x_k x_k^\intercal , \\
-M_k
-&= (\Lambda_{k\-1} + x_k x_k^\intercal)^{-1}(\Lambda_{k\-1}M_{k\-1} + x_k y_k^\intercal)  , \\
-\Omega_k 
-&= \Omega_{k\-1} + y_k y_k^\intercal  +  M_{k\-1}^{\intercal}\Lambda_{k\-1}M_{k\-1} - \\
-& (\Lambda_{k\-1}M_{k\-1} \! + \! x_k y_k^\intercal)^{\intercal} (\Lambda_{k\-1} \! + \! x_k x_k^\intercal)^{-1} (\Lambda_{k\-1} M_{k\-1} \! + \! x_k y_k^\intercal)  . \nonumber
+\nu_k &= \nu_{k\-1} + 1 , \\
+\Lambda_k &= \Lambda_{k\-1} + x_k x_k^\intercal , \\
+M_k &= (\Lambda_{k\-1} + x_k x_k^\intercal)^{-1}(\Lambda_{k\-1}M_{k\-1} + x_k y_k^\intercal) , \\
+\Omega_k &= \Omega_{k\-1} + y_k y_k^\intercal + M_{k\-1}^{\intercal}\Lambda_{k\-1}M_{k\-1} \nonumber \\
+    &\quad - (\Lambda_{k\-1}M_{k\-1} \! + \! x_k y_k^\intercal)^{\intercal} (\Lambda_{k\-1} \! + \! x_k x_k^\intercal)^{-1} (\Lambda_{k\-1} M_{k\-1} \! + \! x_k y_k^\intercal) . \nonumber
 \end{align}
+Marginalising the likelihood over the MNW prior yields a multivariate Student-t posterior predictive:
+\begin{align} \label{eq:postpred}
+    p(y_k \given u_k, \mathcal{D}_{k\-1}) = \mathcal{T}_{\eta_k}\!\Big(y_k \given \mu_k(u_k), \Sigma_k(u_k) \Big) ,
+\end{align}
+with $\eta_k = \nu_{k-1} - D_y + 1$ and
+\begin{align}
+\mu_k(u_k) &= M_{k-1}^{\intercal} x_k , \\
+\Sigma_k(u_k) &= \frac{\Omega_{k\-1}}{\nu_{k\-1} \! - \! D_y \! + \! 1} \Big(1 + x_k^{\intercal} \Lambda_{k\-1}^{-1} x_k \Big) .
+\end{align}
+Both the mean $\mu_k$ and scale $\Sigma_k$ are smooth functions of $u_k$.
 
-%
-\paragraph{Controls} \label{sec:fe-controls}
-% We describe a procedure for inferring a sequence of controls based on free energy minimization \cite{friston2015active,buckley2017free}. 
-Reinforcement learning produces a policy that maximizes a reward function. But this is not the only way to learn from interactions with an environment. Actions are latent variables in a model and can be inferred, just like any other latent variable. We follow the perspective of active inference \cite{friston2009reinforcement,parr2022active}, where we infer a variational posterior distribution over actions using an \emph{expected} free energy functional \cite{friston2015active}. 
-We first describe a 1-step ahead control procedure, where all parts of the agent's memory $x_k$ are observed. We then generalize the procedure to longer time horizons. 
+\subsubsection{Planning}
 
-We start with building a generative model for the input and output at time $t = k+1$:
-\begin{align} \label{eq:p-future}
-    p(y_t, \Theta, u_t | \mathcal{D}_k) \! = \!  p(y_t | \Theta, u_t, \bar{u}_t, \bar{y}_t) p(\Theta | \mathcal{D}_k) p(u_t)  .
-\end{align}
-We want the agent to pursue a target, a specific future observation. To do so, we first isolate the marginal distribution for the future output, 
-\begin{align} \label{eq:decomp-futurejoint}
-    &p(y_t | \Theta, u_t, \bar{u}_t, \bar{y}_t) p(\Theta | \mathcal{D}_k) \! = \! p(\Theta | y_t, u_t, \mathcal{D}_k) p(y_t) ,
-\end{align}
-and then constrain the marginal to a specific parametric distribution (the \emph{goal prior}), $p(y_t) \rightarrow p(y_t \given y_{*})$.
+To select controls over a horizon $\tau = (k{+}1, \dots, k{+}T)$, the agent unrolls the autoregressive model forward. At each step $t \in \tau$, the regressor is formed as $x_t = [u_t,\ \bar{u}_t,\ \hat{y}_{t-1}]^{\intercal}$, where future outputs not yet observed are substituted with MAP estimates of earlier predictives, $\hat{y}_{t-1} = [\mu_{t-1}(u_{t-1}),\ \mu_{t-2}(u_{t-2}),\ \dots]$. This yields a sequence of Student-t predictives $p(y_t \given u_t, \mathcal{D}_k)$ with means $\mu_t(u_t)$ and scales $\Sigma_t(u_t)$.
 
-The distribution over parameters given the future output and input, is unknown to us. We use Bayes' rule in the reverse direction to relate it to known distributions:
-\begin{align} \label{eq:futureparampost-bayes}
-    p(\Theta \given y_t, u_t, \mathcal{D}_k) = \frac{p(y_t \given \Theta, u_t, \bar{u}_t, \bar{y}_t) p(\Theta \given \mathcal{D}_k)}{p(y_t \given u_t, \mathcal{D}_k)} \, .
+The planning objective is the Expected Free Energy (EFE), defined as the sum of KL divergences between each posterior predictive and the goal prior:
+\begin{align} \label{eq:EFE}
+    \mathcal{J}(u_\tau) = \sum_{t \in \tau} D_{\mathrm{KL}}\!\Big[p(y_t \given u_t, \mathcal{D}_k) \,\Big\|\, p(y_t \given y_{*}) \Big] .
 \end{align}
-%The distribution that results from the marginalization in t
-The marginal likelihood in the denominator is actually the posterior predictive distribution, since it is the marginalization of the likelihood of a future observation.
-
-\begin{align} \label{eq:EFE0}
-\mathcal{F}_k[q] = \mathbb{E}_{q(y_t, \Theta, u_t)} \Big[ \ln \frac{q(y_t, \Theta, u_t)}{p(y_t, \Theta, u_t \given y_{*}, \mathcal{D}_k)} \Big] \, .
-\end{align}
-where the variational model is specified to be:
-\begin{align} \label{eq:q-factorization}
-    q(y_t, \Theta, u_t) = q(y_t \given \Theta, u_t) q(\Theta) q(u_t) \, .
-\end{align}
-The first two factors are constrained to be equal to factors of the generative model,
+Expanding this KL divergence yields goal-seeking terms (functions of $\mu_t$, penalising deviation from $m_*$) and information-seeking terms (functions of $\Sigma_t$, penalising output uncertainty). Together with the control prior, these produce the MAP action selection problem over the planning horizon:
 \begin{align}
-    q(y_t \given \Theta, u_t) &= p(y_t \given \Theta, u_t, \bar{u}_t, \bar{y}_t) \\
-    q(\Theta) &= p(\Theta \given \mathcal{D}_k) \, .
+    \hat{u}_\tau
+    &= \underset{u_\tau \, \in \, \mathbb{U}^T}{\arg \min} \sum_{t \in \tau} \left[ -\frac{1}{2}\ln | \Sigma_t(u_t) | + \frac{1}{2} \tr\!\left[S_{*}^{-1} \frac{\eta_t}{\eta_t \! - \! 2}\Sigma_t(u_t) \right] \right. \nonumber \\
+    &\quad \left. + \frac{1}{2}\big(\mu_t(u_t) \! - \! m_{*}\big)^{\intercal} S_{*}^{-1} \big(\mu_t(u_t) \! - \! m_{*}\big) + u_t^{\intercal} \Upsilon u_t \right] , \label{eq:total-MAP}
 \end{align}
-%
-Inferring the optimal control at time $t$ refers to minimizing the free energy functional with respect to the variational distribution $q(u_t)$:
-\begin{align} \label{eq:optimal-q}
-    q^{*}(u_t) = \underset{q \, \in \, Q}{\arg \min} \ \mathcal{F}_k[q] \, .
-\end{align}
-where $Q$ represents the set of probability distributions with support over $\mathcal{U}$.
-The optimal variational posterior under the free energy functional defined in \eqref{eq:optimal-q} is:
-\begin{align}
-    q^{*}(u_t) =  \frac{p(u_t) \exp\big( - \mathcal{J}(u_t) \big)}{\int p(u_t) \exp\big( - \mathcal{J}(u_t) \big) \mathrm{d}u_t } \, ,
-\end{align}
-where $\mathcal{J}(u_t) = D_{\text{KL}}\big[p(y_t \given u_t, \mathcal{D}_k) \| p(y_t \given y_{*} ) \big]$ is the Kullback-Leibler divergence between the posterior predictive and the goal prior distribution.
-
-We refer to the terms in Eq.~\ref{eq:expJu} that are a function of $\Sigma(u_t)$ as "information-seeking" parts of the objective, because they bias the posterior towards actions that reduce uncertainty on future output predictions. We refer to terms that are a function $\mu(u_t)$ as "goal-seeking" because they bias the posterior towards actions that lead to future system outputs close to $m_{*}$, with respect to the metric imposed by the goal prior covariance matrix $S_{*}$. This is illustrated later in Section \ref{sec:explore-vs-exploit}.
-
-The generative model for time steps $\tau = (k+1, \dots, k+T)$ is:
-\begin{align}
-    p(y_{\tau}, \Theta, &\, u_\tau \given \mathcal{D}_k) = \\
-    & p(\Theta \given \mathcal{D}_k) \prod_{t \in \tau} \, p(y_t \given \Theta, u_t, \bar{u}_t, \bar{y}_t) \, p(u_t) \, . \nonumber
-\end{align}
-To impose the constraint on the marginal future output distributions, we require the marginal likelihood with respect to the product of autoregressive likelihoods;
-\begin{align}
-    p(y_\tau &\given u_\tau, \mathcal{D}_k) = \\
-    &\int p(\Theta \given \mathcal{D}_k)  \prod_{t \in \tau} \, p(y_t \given \Theta, u_t, \bar{u}_t, \bar{y}_t) \ \mathrm{d}\Theta \, . \nonumber 
-\end{align}
-Marginalizing over the parameter posterior $p(\Theta \given \mathcal{D}_k)$ is challenging. Instead, we adopt an approximation commonly used in frequentist inference procedures \cite{khandelwal2018simulation,billings2013nonlinear}: at each time $t \in \tau$, we replace the elements of $\bar{y}_t$ with the maximum a posteriori point estimates under their posterior predictive distributions. We denote this as $\hat{y}_t = [\mu_{t\-1}(u_{t\-1}) \ \ \mu_{t\-2}(u_{t\-2}) \ \dots ]$. This means that we approximate the joint posterior predictive as
-\begin{align}
-    p(y_\tau &\given u_\tau, \mathcal{D}_k) = \prod_{t \in \tau} p(y_{t} \given u_{t}, \mathcal{D}_k) \, ,
-\end{align}
-where for $t \geq k+2$, each posterior predictive is:
-\begin{align}
-    p(&y_{t} \given u_{t}, \mathcal{D}_k) = \\
-    &\mathcal{T}(y_{t} \given M_k^{\intercal} \begin{bmatrix} u_t \\ \bar{u}_t \\ \hat{y}_{t\-1} \end{bmatrix}, \frac{1}{\nu_k} \Omega_k (1 + \begin{bmatrix} u_t \\ \bar{u}_t \\ \hat{y}_{t\-1} \end{bmatrix}^{\intercal} \Lambda_k^{-1} \begin{bmatrix} u_t \\ \bar{u}_t \\ \hat{y}_{t\-1} \end{bmatrix}, \eta_t) \, . \nonumber
-\end{align}
-To summarize, we recursively apply the 1-step ahead prediction to build a $T$-step ahead prediction and an approximate control posterior for the entire planning horizon:
-\begin{align}
-    q^{*}(u_\tau) \propto \prod_{t \in \tau} p(u_t) \exp( - \mathcal{J}(u_t)) \, .
-\end{align}
-Note that the goal prior is the same for each $t \in \tau$.
- 
-It is important to quantify uncertainty over controls. However, when interacting with the environment, we can ultimately only execute \emph{one} action. For this, we calculate the maximum a posteriori (MAP). The MAP estimate can be expressed as a minimization over a negative logarithmic transformation of $q^{*}(u_t)$:
-\begin{align}
-    \hat{u}_\tau 
-    &= \underset{u_\tau \, \in \, \mathbb{U}^T}{\arg \min} \sum_{t \in \tau} -\frac{1}{2}\ln | \Sigma_t(u_t) | + \frac{1}{2} \tr\big[S_{*}^{-1} \frac{\eta_t}{\eta_t \! - \! 2}\Sigma_t(u_t) \big] \nonumber \\
-    &\quad  + \frac{1}{2}(\mu_t(u_t) \! - \! m_{*} \big)^{\intercal} S_{*}^{-1} \big(\mu_t(u_t) \! - \! m_{*} ) + u_t^{\intercal} \Upsilon u_t\, . \label{eq:total-MAP}
-\end{align}
-$\mathbb{U}^{T} = \mathbb{U} \times \mathbb{U} \times \dots $ refers to the space of affordable controls over a planning horizon of length $T$, where practical constraints such as torque limits can be incorporated.
-
-%
-The autoregression coefficient matrix $\Lambda_k$, of size $D_x \times D_x$, has to be inverted each time-step. It is possible to re-parameterize the matrix normal distribution in terms of a covariance matrix instead, but then that matrix will have to be inverted during parameter updates (Eq.~\ref{eq:postparams}). For numerical stability purposes, it is recommended to keep track of a Cholesky factor.
+where $\mathbb{U}^{T} = \mathbb{U} \times \dots \times \mathbb{U}$ is the space of affordable controls over the horizon.
 
 \ajith{For ICRA, a pseudocode here (with links to exact equations) will help engineers to replicate/understand the work}
 
 \section{EXPERIMENTS}
+\label{sec:experiments}
 
 We evaluate three parameter-selection strategies for the Hopf-oscillator CPG controller on the Laikago quadruped in PyBullet: (i) an offline \emph{grid search} over a small set of CPG parameters; (ii) online \emph{Bayesian optimization} (BO) with a Gaussian-process surrogate and a UCB acquisition function; and (iii) the proposed \emph{MARX-EFE} active inference agent, which continually updates CPG parameters by minimising expected free energy. Grid search serves as a fixed, non-adaptive reference point, BO serves as a state-of-the-art black-box optimizer, and MARX-EFE is the proposed continual learning agent.
 
@@ -366,6 +260,41 @@ We score each method on four quantities computed over the $3.0$\,s steady-state 
     J = w_1\,R_v - w_2\,\mathrm{CoT} - w_3\,\mathcal{S}\,,
 \end{align}
 with velocity reward $R_v = \frac{1}{T}\sum_k \exp(-\|v_k-v^{*}\|^2/\sigma_v^2)$, cost of transport $\mathrm{CoT}=\int P_{\mathrm{mech}}\,\mathrm{d}t / (m g d)$, and combined RMS stability $\mathcal{S}=\sqrt{\mathrm{RMS}(\gamma^r)^2+\mathrm{RMS}(\gamma^p)^2}$; the forward distance $d_y$; the lateral drift $|d_x|$; and the fall rate. To compare sample efficiency, we report the number of trials $N_{\mathrm{walk}}$ required to reach $J\ge J_{\mathrm{th}}$ with cumulative fall rate below $r_{\mathrm{th}}$, and the cumulative forward distance $D_{\mathrm{cum}}$ accumulated over the optimization horizon.
+
+\subsection{Online adaptation across friction transitions}
+\label{sec:exp-friction-online}
+
+Beyond the episodic optimisation above, we evaluate a fully \emph{online} setting in which the terrain changes underfoot during a single uninterrupted bout, isolating each method's \emph{update rate}. The robot walks forward for $T=45$\,s ($4500$ control steps) with no resets, over flat ground whose lateral friction varies in space: a random sequence of zones (slippery $\mu{=}0.45$, normal $0.7$, grip $1.1$, rubber $1.6$; $1.5$--$3.5$\,m long) is sampled per terrain and the ground friction is set each step from the robot's forward position. The controller must hold the target velocity $v^{*}=1.0$\,m/s while repeatedly crossing surface changes it cannot reset away from.
+
+The two adaptive methods update at different cadences. Online BO re-optimises once every $4.5$\,s: it scores the just-finished window with the objective of Eq.~\ref{eq:obj}, augments its GP, and proposes the next parameters by maximising UCB within a TuRBO-style trust region~\cite{eriksson2019turbo} of radius $\rho=0.2$ around the incumbent, interpolating over the next $1.5$\,s. The trust region limits per-update jumps and equalises caution between the methods. MARX-EFE updates its posterior every step ($\Delta t=0.01$\,s) and re-plans the CPG parameters every $1.0$\,s by minimising expected free energy. Grid search is excluded, as it cannot adapt online. Both methods start from the same mid-range gait, since in a no-reset bout a fatal random initialisation would end the run immediately.
+
+Over $N=50$ random terrains we report the fall rate, the mean velocity-tracking error $\overline{|v_x-v^{*}|}$, the tip-over deviation $\sqrt{(\gamma^r)^2+(\gamma^p)^2}$, the heading (yaw) drift $\overline{|\gamma^{y}|}$, and the forward distance, all averaged over $t>1.5$\,s.
+
+\begin{table}[t]
+\centering
+\caption{Online continuous run across varying friction ($N=50$ terrains, $45$\,s, mean $\pm$ s.d.). Lower is better except distance.}
+\label{tab:online}
+\begin{tabular}{lcc}
+\hline
+Metric & BO ($4.5$\,s, TR) & MARX-EFE ($1$\,s) \\
+\hline
+Fall rate            & $54\%$            & $\mathbf{12\%}$ \\
+Velocity error [m/s] & $0.61 \pm 0.36$   & $\mathbf{0.58} \pm 0.37$ \\
+Tip-over [deg]       & $7.8 \pm 1.9$     & $\mathbf{7.3} \pm 1.2$ \\
+Yaw drift [deg]      & $50.6$            & $\mathbf{44.7}$ \\
+Distance [m]         & $25.5$            & $\mathbf{34.3}$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{experiment-friction/results-online/figures/online_velocity_trace.png}
+\caption{Online forward-velocity tracking across friction zones on one terrain. The robot walks forward continuously (no resets); shaded bands mark low-friction zones. Both controllers track $v^{*}=1.0$\,m/s, but BO holds its parameters for $4.5$\,s while MARX-EFE re-plans every $1$\,s.}
+\label{fig:online-trace}
+\end{figure}
+
+Table~\ref{tab:online} summarises the comparison. With caution equalised by the trust region, MARX-EFE falls roughly $4.5\times$ less often than online BO ($12\%$ vs.\ $54\%$) and travels about $35\%$ further, while velocity-tracking accuracy and tip-over stability are statistically indistinguishable while both remain upright (Fig.~\ref{fig:online-trace}). Since the trust region removes BO's large exploratory steps, the residual gap is attributable to the \emph{update rate}: holding parameters fixed for $4.5$\,s, BO cannot react when it steps onto a low-friction patch, whereas MARX-EFE re-plans within $1$\,s and adjusts before losing balance. The advantage is therefore one of \emph{robustness to mid-run terrain changes} rather than steady-state tracking precision.
 
 
 \section{DISCUSSION}

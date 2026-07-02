@@ -29,20 +29,23 @@ if _REPO_ROOT not in sys.path:
 import numpy as np
 
 RESULTS_DIR = os.path.join(_HERE, "results")   # writes into this experiment folder
-TARGET_FORWARD_POSITION = 4.0
+TARGET_FORWARD_POSITION = 4.0    # (legacy) position goal still used by MARX-EFE's objective
+PAPER_TARGET_VELOCITY   = 0.5    # v*_x [m/s] tracked by BO/grid objective (Zhang et al. IROS 2024)
 ROBOT_MASS = 10.0
 N_INIT = 5
 
 # MARX-EFE agent config: per-trial parameter selection (update_every=0) — static
-# terrain needs no within-episode adaptation.
-TARGET_VELOCITY     = 1.0
+# terrain needs no within-episode adaptation. Agent goal AND objective both track
+# PAPER_TARGET_VELOCITY so all three methods are scored identically.
+TARGET_VELOCITY     = PAPER_TARGET_VELOCITY
 GOAL_PRIOR_STD      = (0.5, 0.5, np.deg2rad(45), np.deg2rad(45))   # [vx,vy,pitch,roll]
 CONTROL_PRIOR_SCALE = 1.0
 UPDATE_EVERY        = 100     # re-select actions every 100 steps (= 1 s); model still updates every step
 FORGETTING          = 1.0
 TIME_HORIZON        = 2       # EFE planning horizon (steps)
 
-METHOD_COLORS = {"GridSearch": "tab:green", "BO": "tab:blue", "MARXEFE": "tab:orange"}
+METHOD_COLORS = {"GridSearch": "tab:green", "BO": "tab:blue",
+                 "MARXEFE": "tab:orange"}
 
 
 def run_one_seed(seed, n_trials):
@@ -57,12 +60,12 @@ def run_one_seed(seed, n_trials):
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     gridsearch_optimize_cpg(
-        bounds, target_forward_position=TARGET_FORWARD_POSITION,
+        bounds, target_velocity=PAPER_TARGET_VELOCITY,
         robot_mass=ROBOT_MASS, n_trials=n_trials,
         optimizer_name="GridSearch", seed=seed, results_dir=RESULTS_DIR)
 
     bo_optimize_cpg(
-        bounds, target_forward_position=TARGET_FORWARD_POSITION,
+        bounds, target_velocity=PAPER_TARGET_VELOCITY,
         robot_mass=ROBOT_MASS, n_trials=n_trials, n_init=N_INIT,
         optimizer_name="BO", seed=seed, results_dir=RESULTS_DIR)
 
@@ -74,6 +77,7 @@ def run_one_seed(seed, n_trials):
         target_velocity=TARGET_VELOCITY, update_every=UPDATE_EVERY,
         forgetting=FORGETTING, time_horizon=TIME_HORIZON,
         debug_first_trial=False)
+
 
 
 def aggregate_and_plot(seeds, n_trials):

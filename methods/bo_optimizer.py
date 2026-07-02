@@ -4,12 +4,16 @@ Provides:
   * BetaSchedule, BOOptimizer — the generic GP-UCB optimizer (any black-box
     `evaluate` callable mapping a parameter vector → scalar J to maximize).
   * CPG-specific pipeline (run_cpg_trial, compute_objective, evaluate_candidate,
-    bo_optimize_cpg) for tuning Righetti-style central pattern generator
-    parameters on the Laikago quadruped in PyBullet.
+    bo_optimize_cpg) for tuning a joint-space Righetti-style CPG on the Laikago
+    quadruped in PyBullet.
 
-The CPG pipeline shares its 4-D observation [pos_x, pos_y, pitch, roll] and its
-position-based goal (target_forward_position, 0, 0, 0) with the MARXEFE active
-inference baseline so the two can be compared directly.
+8 optimised parameters (joint-space convention):
+  [coupling_gain, w_swing, w_stance, F_FAST, STOP_GAIN, hip_amplitude,
+   knee_amplitude, b]
+
+The objective J tracks a target forward velocity v*_x (Zhang et al. IROS 2024,
+eq. 9) and is shared with the MARXEFE active-inference baseline so the methods
+can be compared directly.
 """
 
 import csv
@@ -194,6 +198,16 @@ class BOOptimizer:
 USE_GUI = False
 
 # ============================================================================
+# CONTROL RATE  (Zhang et al. run the CPG + PD at f = 1 kHz)
+# ============================================================================
+# The joint-space CPG below is rate-dependent (F_FAST/STOP force feedback and a
+# step-based contact debounce were tuned at 100 Hz). Empirically it walks cleanly
+# at 100 Hz (no falls, ~5 m in 4.5 s) but tips within <1 s at 200/500 Hz. So the
+# validated rate is 100 Hz. (Raising the rate helped only the Zhang-et-al.
+# Cartesian controller's contact resolution, which was found unstable and dropped.)
+CONTROL_DT = 0.01
+
+# ============================================================================
 # PYBULLET SETUP FUNCTIONS
 # ============================================================================
 
@@ -293,15 +307,14 @@ _prev_params = None
 
 
 def run_cpg_trial(params: np.ndarray,
-                  target_forward_position: float,
+                  target_velocity: float = 0.0,   # unused here; objective consumes it
                   context_mode: str = "flat",
                   robot_mass: float = 10.0) -> dict:
     """Run a single CPG-controlled locomotion trial with MARXEFE-style reset."""
     global _prev_params, quadruped
 
     if quadruped is None:
-        dt = 0.01
-        load_environment(dt)
+        load_environment(CONTROL_DT)
         quadruped, _, _, _, _ = load_robot(p, robot_mass=robot_mass)
         print(f"[run_cpg_trial] Initialized environment with robot ID: {quadruped} (mass={robot_mass} kg)")
 
@@ -321,7 +334,7 @@ def run_cpg_trial(params: np.ndarray,
     hip_offset = 0.26
     knee_offset = -1.0
 
-    dt = 0.01
+    dt = CONTROL_DT
     trial_duration = 4.5
     trial_steps = int(trial_duration / dt)
     transition_duration = 1.5
@@ -349,8 +362,8 @@ def run_cpg_trial(params: np.ndarray,
     for jid in knee_joint_ids:
         p.resetJointState(quadruped, jid, -0.6)
 
-    # PRE-TRIAL SETTLING (OUTSIDE 4.5s trial)
-    for settle_step in range(100):
+    # PRE-TRIAL SETTLING (OUTSIDE 4.5s trial) — 0.5 s regardless of dt
+    for settle_step in range(int(0.5 / dt)):
         for jid in abduction_joint_ids:
             p.setJointMotorControl2(
                 quadruped, jid, p.POSITION_CONTROL,
@@ -669,7 +682,8 @@ def run_cpg_trial(params: np.ndarray,
         "forward_distance": forward_distance,
         "lateral_drift": lateral_drift,
         "stability": combined_stability,
-        "mean_vx": mean_vx
+        "mean_vx": mean_vx,
+        "dt": dt,
     }
 
 
@@ -678,49 +692,44 @@ def run_cpg_trial(params: np.ndarray,
 # ============================================================================
 
 def compute_objective(trial_data: dict,
-                      target_forward_position: float,
+                      target_velocity: float,
                       robot_mass: float,
                       g: float = 9.81) -> float:
-    """Compute J = position_reward - w2*CoT_norm - w3*stability.
+    """Velocity-tracking objective J (Zhang et al. IROS 2024, eq. 9).
 
-    Position reward rewards closeness of (pos_x, pos_y) to
-    (target_forward_position, 0) across the steady-state window. Mirrors the
-    MARXEFE goal prior so BO and MARXEFE optimise the same signal.
+        J = w1 * Σ_steady dt * min(exp(-‖v_xy - v*_xy‖² / 0.05), l_r) - w2 * CoT
+
+    with v*_xy = [target_velocity, 0], w1 = 1, w2 = 0.5, l_r = 0.85. The reward
+    integrates a Gaussian velocity-tracking bonus over the 3 s steady-state
+    window (dt·Σ ≈ ∫), so it is invariant to the control timestep and rewards a
+    gait that holds the target speed; the CoT term then drives energy efficiency.
+
+    This replaces the previous absolute-position reward (target 4 m, σ = 1 m),
+    which was saturated to ≈0 everywhere the robot could actually reach, giving
+    the optimiser no gradient toward walking (its optimum was to stand still).
     """
     t = trial_data["t"]
     transition_duration = trial_data["transition_duration"]
     steady_idx = np.searchsorted(t, transition_duration)
 
     if steady_idx >= len(t) - 5:
-        return -50.0
+        return -50.0   # fell during or just after the transition phase
 
-    t_steady = t[steady_idx:]
-    pos_x_steady = trial_data["pos_x"][steady_idx:]
-    pos_y_steady = trial_data["pos_y"][steady_idx:]
+    dt = trial_data.get("dt", t[1] - t[0] if len(t) > 1 else CONTROL_DT)
+    vx_steady = np.asarray(trial_data["vx"][steady_idx:])
+    vy_steady = np.asarray(trial_data["vy"][steady_idx:])
     torques_steady = trial_data["torques"][steady_idx:, :]
     qdot_steady = trial_data["qdot"][steady_idx:, :]
     base_pos_steady = trial_data["base_pos"][steady_idx:, :]
 
-    T = len(t_steady)
+    # ── Velocity-tracking reward (paper eq. 9, first term) ────────────────────
+    w1, w2, l_r = 1.0, 0.5, 0.85
+    err = ((vx_steady - target_velocity) ** 2 + vy_steady ** 2) / 0.05
+    reward = np.minimum(np.exp(-err), l_r)
+    velocity_term = w1 * dt * np.sum(reward)   # dt·Σ ≈ ∫ over the steady window
 
-    # Position reward (matches MARXEFE goal prior over [pos_x, pos_y])
-    w1 = 5.0
-    l_r = 0.85
-    sigma_pos_x = 1.0   # forward position tolerance (m)
-    sigma_pos_y = 0.1   # lateral  position tolerance (m)
-    R_p_sum = 0.0
-    for i in range(T):
-        err_sq = ((pos_x_steady[i] - target_forward_position) / sigma_pos_x)**2 \
-               + (pos_y_steady[i] / sigma_pos_y)**2
-        reward_i = np.exp(-0.5 * err_sq)
-        R_p_sum += min(reward_i, l_r)
-    R_p = R_p_sum / T
-    position_term = w1 * R_p
-
-    # Cost of Transport
-    w2 = 0.4
-    delta_t = 0.01   # must match the simulator timestep (p.setTimeStep(0.01))
-    mechanical_power = np.sum(np.abs(torques_steady * qdot_steady)) * delta_t
+    # ── Cost of Transport (paper eq. 10) ──────────────────────────────────────
+    mechanical_power = np.sum(np.abs(torques_steady * qdot_steady)) * dt
     d = base_pos_steady[-1, 1] - base_pos_steady[0, 1]
     if d < 0.5:
         CoT_cap = 200.0
@@ -728,19 +737,10 @@ def compute_objective(trial_data: dict,
         CoT_cap = 150.0
     else:
         CoT_cap = 100.0
-
-    if d < 0.005:
-        CoT = mechanical_power / (robot_mass * g * max(d, 0.001))
-    else:
-        CoT = mechanical_power / (robot_mass * g * d)
-
+    CoT = mechanical_power / (robot_mass * g * max(abs(d), 0.001))
     CoT = min(CoT, CoT_cap)
-    CoT_norm = CoT / 50.0
 
-    stability = trial_data["stability"]
-    w3 = 0.02
-
-    J = position_term - w2 * CoT_norm - w3 * stability
+    J = velocity_term - w2 * CoT
     return J
 
 
@@ -748,14 +748,18 @@ def compute_objective(trial_data: dict,
 # EVALUATION FUNCTION (metrics keys aligned to MARXEFE CSV schema)
 # ============================================================================
 
-def evaluate_candidate(params_np, target_forward_position, robot_mass, optimizer_name, seed, trial_idx):
-    """Evaluate candidate parameters and return standardized metrics."""
+def evaluate_candidate(params_np, target_velocity, robot_mass, optimizer_name, seed, trial_idx):
+    """Evaluate candidate parameters and return standardized metrics.
+
+    ``target_velocity`` is the forward speed set-point v*_x [m/s] tracked by the
+    objective (Zhang et al. eq. 9).
+    """
     sim_start = time.time()
 
-    trial_data = run_cpg_trial(params_np, target_forward_position, context_mode="flat", robot_mass=robot_mass)
+    trial_data = run_cpg_trial(params_np, target_velocity, context_mode="flat", robot_mass=robot_mass)
     sim_time_sec = time.time() - sim_start
 
-    J = compute_objective(trial_data, target_forward_position, robot_mass)
+    J = compute_objective(trial_data, target_velocity, robot_mass)
 
     forward_distance = trial_data["forward_distance"]
     lateral_drift    = trial_data["lateral_drift"]
@@ -772,7 +776,7 @@ def evaluate_candidate(params_np, target_forward_position, robot_mass, optimizer
         torques_steady    = trial_data["torques"][steady_idx:, :]
         qdot_steady       = trial_data["qdot"][steady_idx:, :]
         base_pos_steady   = trial_data["base_pos"][steady_idx:, :]
-        dt_val            = t[1] - t[0] if len(t) > 1 else 0.01
+        dt_val            = trial_data.get("dt", t[1] - t[0] if len(t) > 1 else CONTROL_DT)
         mechanical_power  = np.sum(np.abs(torques_steady * qdot_steady)) * dt_val
         fwd_dist          = base_pos_steady[-1, 1] - base_pos_steady[0, 1]
         if fwd_dist < 0.5:
@@ -818,14 +822,14 @@ def evaluate_candidate(params_np, target_forward_position, robot_mass, optimizer
         "opttimesec":      opt_time_sec,
         "simtimesec":      sim_time_sec,
         "totaltimesec":    total_time_sec,
-        "couplinggain":   params_np[0],
-        "wswing":         params_np[1],
-        "wstance":        params_np[2],
-        "FFAST":          params_np[3],
-        "STOPGAIN":       params_np[4],
-        "hipamplitude":   params_np[5],
-        "kneeamplitude":  params_np[6],
-        "b":              params_np[7],
+        "gc":           params_np[0],
+        "gp":           params_np[1],
+        "omegaswing":   params_np[2],
+        "omegastance":  params_np[3],
+        "mu":           params_np[4],
+        "xofffront":    params_np[5],
+        "xoffhind":     params_np[6],
+        "sigmaN":       params_np[7],
     }
 
     return J, metrics
@@ -837,7 +841,7 @@ def evaluate_candidate(params_np, target_forward_position, robot_mass, optimizer
 
 def bo_optimize_cpg(
     bounds: torch.Tensor,
-    target_forward_position: float,
+    target_velocity: float,
     robot_mass: float,
     n_trials: int = 100,
     n_init: int = 5,
@@ -867,17 +871,16 @@ def bo_optimize_cpg(
         "fell", "stabilityindex",
         "rmsrolldeg", "rmspitchdeg",
         "opttimesec", "simtimesec", "totaltimesec",
-        "couplinggain", "wswing", "wstance",
-        "FFAST", "STOPGAIN",
-        "hipamplitude", "kneeamplitude", "b",
+        "gc", "gp", "omegaswing",
+        "omegastance", "mu",
+        "xofffront", "xoffhind", "sigmaN",
     ]
     csv_file   = open(csv_path, 'w', newline='')
     csv_writer = csv.DictWriter(csv_file, fieldnames=csv_columns)
     csv_writer.writeheader()
 
     if quadruped is None:
-        dt = 0.01
-        load_environment(dt)
+        load_environment(CONTROL_DT)
         quadruped, _, _, _, _ = load_robot(p, robot_mass=robot_mass)
         print(f"\n✅ Environment initialized with robot ID: {quadruped} (mass={robot_mass} kg)")
 
@@ -905,7 +908,7 @@ def bo_optimize_cpg(
     print("\n" + "="*70)
     print("BAYESIAN OPTIMIZATION OF CPG PARAMETERS")
     print("="*70)
-    print(f"Target forward position: {target_forward_position} m (lateral target = 0)")
+    print(f"Target forward velocity: {target_velocity} m/s (lateral target = 0)")
     print(f"Robot mass: {robot_mass} kg")
     print(f"Total trials: {n_trials} (init: {n_init}, BO: {n_trials - n_init})")
     print(f"Optimizer: {optimizer_name}, Seed: {seed}")
@@ -918,8 +921,8 @@ def bo_optimize_cpg(
     print(f"\nPhase 1: Random Initialization ({n_init} trials)")
     print("-"*70)
 
-    param_names = ["couplinggain", "wswing", "wstance", "FFAST",
-                   "STOPGAIN", "hipamplitude", "kneeamplitude", "b"]
+    param_names = ["gc", "gp", "omegaswing", "omegastance",
+                   "mu", "xofffront", "xoffhind", "sigmaN"]
 
     # ------------------------------------------------------------------
     # INITIALIZATION PHASE
@@ -928,7 +931,7 @@ def bo_optimize_cpg(
     for i in range(n_init):
         x_np = rng.uniform(bo.lower.numpy(), bo.upper.numpy())
 
-        J, metrics = evaluate_candidate(x_np, target_forward_position, robot_mass,
+        J, metrics = evaluate_candidate(x_np, target_velocity, robot_mass,
                                         optimizer_name, seed, i + 1)
 
         metrics["opttimesec"]   = 0.0
@@ -973,7 +976,7 @@ def bo_optimize_cpg(
         x_next_np    = bo.from_unit(x_next_unit)
         opt_time_sec = time.time() - opt_start
 
-        J_next, metrics = evaluate_candidate(x_next_np, target_forward_position, robot_mass,
+        J_next, metrics = evaluate_candidate(x_next_np, target_velocity, robot_mass,
                                              optimizer_name, seed, t + 1)
 
         metrics["opttimesec"]   = opt_time_sec
@@ -1060,9 +1063,9 @@ def bo_optimize_cpg(
              color='steelblue', label='Forward Distance (X-axis)')
     ax1.axhline(y=np.max(forward_distances), color='green', linestyle='--', linewidth=1.5,
                 label=f'Max: {np.max(forward_distances):.3f}m', alpha=0.7)
-    target_distance = target_forward_position
+    target_distance = target_velocity * 3.0   # expected distance at v* over the 3 s steady window
     ax1.axhline(y=target_distance, color='red', linestyle='--', linewidth=1.5,
-            label=f'Target: {target_distance:.2f} m', alpha=0.7)
+            label=f'Target: {target_distance:.2f} m (v*={target_velocity:.2f} m/s × 3 s)', alpha=0.7)
     ax1.set_xlabel('Trial Number', fontsize=11)
     ax1.set_ylabel('Forward Distance [m]', fontsize=11)
     ax1.set_title('Forward Distance (Straight Motion)', fontsize=12)
@@ -1115,8 +1118,8 @@ def bo_optimize_cpg(
     fig2 = plt.figure(figsize=(16, 10))
     fig2.suptitle('CPG Parameter Evolution', fontsize=14, fontweight='bold')
 
-    param_names_plot = ["Coupling Gain", "w_swing", "w_stance", "F_FAST",
-                        "STOP_GAIN", "Hip Amplitude", "Knee Amplitude", "b (Sharpness)"]
+    param_names_plot = ["g_c (clearance)", "g_p (penetration)", "omega_swing", "omega_stance",
+                        "mu (amplitude)", "x_off_front", "x_off_hind", "sigma_N (Tegotae)"]
 
     for i, name in enumerate(param_names_plot):
         ax = plt.subplot(3, 3, i+1)
@@ -1198,7 +1201,7 @@ def bo_optimize_cpg(
 if __name__ == "__main__":
     train_X, train_Y, best_params, N_walk, D_cum = bo_optimize_cpg(
         bounds,
-        target_forward_position=4.0,
+        target_velocity=0.5,
         robot_mass=10.0,
         n_trials=200,
         n_init=5,
