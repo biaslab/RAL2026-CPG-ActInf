@@ -111,48 +111,9 @@ In the following, we contribute to the field with
 \section{PROBLEM STATEMENT}
 \label{sec:problem-statement}
 
-\begin{figure*}[tb]
-  \centering
-  \includegraphics[width=\textwidth]{fig1_adaptation_urgency}
-  \caption{Terrain change creates adaptation urgency (schematic).
-  \textbf{(a)}~The performance landscape $J(\theta,\tau)$ shifts when the terrain changes from $\tau$ (solid) to $\tau’$ (dashed). Parameters optimal for $\tau$ lie in a suboptimal region for $\tau’$, creating a parameter mismatch~$\delta_k$.
-  \textbf{(b)}~Without rapid adaptation the mismatch initiates a positive feedback loop that degrades locomotion quality below the fall threshold before the adaptation deadline $T_{\mathrm{dead}}$. A fast continual learning agent (green, solid) converges within a few trials; a slow optimizer (blue, dashed) does not recover in time; an agent with fixed parameters (grey, dotted) degrades monotonically.}
-  \label{fig:adaptation_urgency}
-\end{figure*}
-
-\paragraph{Locomotion task}
-Consider a quadruped robot navigating terrain with condition $\tau$ (characterised, for instance, by surface friction $\mu_s$ or slope angle $\phi$). The robot has four legs, each with two joints driven by servomotors: a hip angle $\phi_i^h(t)$ and a knee angle $\phi_i^k(t)$ for leg $i = 1,\ldots,4$. At discrete time step $k$ with sampling interval $\Delta t$, the base pose is described by its position $\mathbf{q}_k = (q^x_k, q^y_k, q^z_k)$ and Euler angles $\boldsymbol{\gamma}_k = (\gamma^p_k, \gamma^r_k, \gamma^y_k)$ for pitch, roll, and yaw, respectively. We measure locomotion quality by the scalar objective $J(\theta, \tau)$ (defined in Sec.~\ref{sec:experiments}), which depends on both the CPG parameter vector $\theta \in \mathbb{R}^8$ and the terrain $\tau$. A fall is declared if $q^z_k < h_{\min}$ or $|\gamma^r_k| > \gamma_{\max}$ at any time step, where $h_{\min}$ and $\gamma_{\max}$ are safety thresholds.
-
-\paragraph{Terrain-dependent optimal parameters}
-For a given terrain $\tau$ there exists an optimal CPG parameter vector
-\begin{align}
-    \theta^*(\tau) = \arg\max_{\theta} \, \mathbb{E}\big[J(\theta, \tau)\big] \,,
-    \label{eq:optimal-params}
-\end{align}
-where the expectation is over the stochastic outcomes of a locomotion trial. Critically, the performance landscape $J(\theta,\tau)$ shifts when the terrain changes: parameters tuned for flat ground become suboptimal on a slope or a slippery surface (Fig.~\ref{fig:adaptation_urgency}a). A terrain change $\tau \to \tau’$ therefore immediately induces a \emph{parameter mismatch}
-\begin{align}
-    \delta_k = \theta_k - \theta^*(\tau’) \,,
-    \label{eq:mismatch}
-\end{align}
-between the robot’s current parameters $\theta_k$ and the new terrain optimum.
-
-\paragraph{The positive feedback cycle}
-The mismatch $\delta_k$ does not merely inflict a static performance penalty---it initiates a positive feedback loop that, if left uncontrolled, accelerates toward an irreversible fall (Fig.~\ref{fig:adaptation_urgency}b):
-%
-\begin{enumerate}
-    \item \emph{Mismatch $\to$ gait error.} Suboptimal CPG parameters produce joint trajectories that deviate from the nominal limit-cycle shape, generating a body-pose error~$e_k$.
-    \item \emph{Gait error $\to$ body perturbation.} Imperfect foot placement excites roll and pitch deviations in $\boldsymbol{\gamma}_k$, which grow with the magnitude of the deviation.
-    \item \emph{Body perturbation $\to$ CPG disturbance.} Large orientation excursions corrupt the sensory feedback driving the oscillator network and pull the CPG state off its limit-cycle attractor.
-    \item \emph{CPG disturbance $\to$ larger gait error.} As the CPG drifts from its attractor, joint trajectories become increasingly erratic, amplifying~$e_k$ and closing the loop.
-\end{enumerate}
-%
-The escalation rate grows with $|\delta_k|$, so that a recoverable suboptimality can quickly become an irreversible fall. This introduces an \emph{adaptation deadline}~$T_{\mathrm{dead}}$: the number of trials within which the agent must drive $\delta_k \approx 0$ before the fall thresholds $h_{\min}$, $\gamma_{\max}$ are breached.
-
-\paragraph{Design criterion}
-The CPG controller must exhibit stable limit-cycle behaviour, allow independent stance and swing modulation \cite{dickinson2000how}, and expose a low-dimensional, continuously adjustable parameter vector $\theta$ that can be updated online after each locomotion trial. Most importantly, the adaptation agent must converge to $\theta^*(\tau’)$ within $O(\text{few})$ trials---before the positive feedback cycle leads to a fall.
-
-
-\section{METHODS}
+We first introduce the central pattern generator that produces coordinated leg motion in a quadrupedal robot.
+We then argue that the parameters yielding stable locomotion depend on the terrain, so that a parameter set tuned for one terrain degrades once the terrain changes.
+This motivates online adaptation of the parameters as a requirement for resuming stable locomotion.
 
 \subsection{Central Pattern Generator}
 
@@ -168,14 +129,44 @@ Each oscillator evolves as:
 \end{align}
 where $r_i = \sqrt{x_i^2 + y_i^2}$, $u$ sets the squared limit-cycle amplitude, $\alpha, \beta > 0$ are convergence rates, $\gamma$ is the coupling gain, and $b$ controls the sharpness of the frequency transition between stance and swing phases.
 
-\subsection{Mapping to Joint Angles}
-
 The CPG outputs $(x_i, y_i)$ are mapped to hip and knee joint angles:
 \begin{align}
 \theta_{\text{hip}} &= \theta_{\text{hip base}} + \theta_{\text{hip range}} \cdot x_i , \\
 \theta_{\text{knee}} &= \theta_{\text{knee base}} - \theta_{\text{knee range}} \cdot \max(0, y_i) ,
 \end{align}
 where $x_i$ drives forward-backward hip swing and $y_i$ controls knee flexion; negative $y_i$ is suppressed to prevent hyperextension.
+
+The behavior of the CPG is governed by a small set of parameters, collected in the vector
+\begin{align}
+    \theta = [\gamma, \omega_{\text{swing}}, \omega_{\text{stance}}, F_{\text{fast}}, K_{\text{stop}}, A_{\text{hip}}, A_{\text{knee}}, b] \,,
+    \label{eq:cpg-parameters}
+\end{align}
+comprising the coupling gain, the phase-dependent stance and swing frequencies, a fast-contact gain and stop gain from the sensory feedback, the hip and knee amplitudes, and the sigmoid sharpness $b$ of Eq.~\ref{Equation 3}.
+These parameters set the gait shape, and are held fixed during locomotion.
+
+\subsection{Terrain-dependent parameters}
+\label{sec:terrain-dependent}
+
+For a fixed terrain, the parameter vector $\theta$ can be tuned to produce stable locomotion.
+Let $e$ denote the terrain and let $V(\theta, e)$ measure locomotion quality on that terrain, rewarding forward progress toward a target while penalizing attitude deviations and falls.
+The best gait for terrain $e$ is then the terrain-conditioned optimum
+\begin{align}
+    \theta^{\star}(e) = \underset{\theta}{\arg\max}\; V(\theta, e) \,.
+    \label{eq:terrain-optimum}
+\end{align}
+
+The difficulty is that $\theta^{\star}(e)$ is not constant across terrains.
+A gait that keeps the trunk level on flat ground pitches the body, shifts foot-contact timing, and alters the coupling needed for coordination once the same legs meet an incline, so the location of the optimum moves.
+We observe this shift directly: the parameters optimized for flat ground and those optimized for a $10^{\circ}$ incline are distinct, and each performs best on the terrain it was tuned for, a crossover in $V$ that holds in both directions.
+Retaining the flat-optimal parameters after the ground turns into an incline roughly doubles the probability of a fall relative to adopting the incline-optimal parameters.
+
+Because $\theta$ is held fixed, a change in terrain leaves the controller operating at a now-suboptimal point $\theta^{\star}(e_{\text{old}}) \neq \theta^{\star}(e_{\text{new}})$.
+The resulting attitude deviations compound over time: as the body rolls, recovery demands larger corrections, and locomotion can fail before the robot has traversed the new terrain.
+To resume stable locomotion after a terrain change, the CPG parameters must therefore be adapted online, which requires both detecting that the terrain has changed and re-tuning $\theta$ toward $\theta^{\star}(e_{\text{new}})$ quickly enough to preserve balance.
+
+
+\section{METHODS}
+
 
 \subsection{Autoregressive Active Inference Agent}
 
@@ -287,12 +278,12 @@ Distance [m]         & $25.5$            & $\mathbf{34.3}$ \\
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{experiment-friction/results-online/figures/online_velocity_trace.png}
-\caption{Online forward-velocity tracking across friction zones on one terrain. The robot walks forward continuously (no resets); shaded bands mark low-friction zones. Both controllers track $v^{*}=1.0$\,m/s, but BO holds its parameters for $4.5$\,s while MARX-EFE re-plans every $1$\,s.}
-\label{fig:online-trace}
-\end{figure}
+%\begin{figure}[t]
+%\centering
+%\includegraphics[width=\linewidth]{experiment-friction/results/figures/online_velocity_trace.png}
+%\caption{Online forward-velocity tracking across friction zones on one terrain. The robot walks forward continuously (no resets); shaded bands mark low-friction zones. Both controllers track $v^{*}=1.0$\,m/s, but BO holds its parameters for $4.5$\,s while MARX-EFE re-plans every $1$\,s.}
+%\label{fig:online-trace}
+%\end{figure}
 
 Table~\ref{tab:online} summarises the comparison. With caution equalised by the trust region, MARX-EFE falls roughly $4.5\times$ less often than online BO ($12\%$ vs.\ $54\%$) and travels about $35\%$ further, while velocity-tracking accuracy and tip-over stability are statistically indistinguishable while both remain upright (Fig.~\ref{fig:online-trace}). Since the trust region removes BO's large exploratory steps, the residual gap is attributable to the \emph{update rate}: holding parameters fixed for $4.5$\,s, BO cannot react when it steps onto a low-friction patch, whereas MARX-EFE re-plans within $1$\,s and adjusts before losing balance. The advantage is therefore one of \emph{robustness to mid-run terrain changes} rather than steady-state tracking precision.
 

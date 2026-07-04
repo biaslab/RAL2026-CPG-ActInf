@@ -309,7 +309,8 @@ _prev_params = None
 def run_cpg_trial(params: np.ndarray,
                   target_velocity: float = 0.0,   # unused here; objective consumes it
                   context_mode: str = "flat",
-                  robot_mass: float = 10.0) -> dict:
+                  robot_mass: float = 10.0,
+                  trial_duration: float = 4.5) -> dict:
     """Run a single CPG-controlled locomotion trial with MARXEFE-style reset."""
     global _prev_params, quadruped
 
@@ -335,7 +336,6 @@ def run_cpg_trial(params: np.ndarray,
     knee_offset = -1.0
 
     dt = CONTROL_DT
-    trial_duration = 4.5
     trial_steps = int(trial_duration / dt)
     transition_duration = 1.5
     transition_steps = int(transition_duration / dt)
@@ -748,15 +748,19 @@ def compute_objective(trial_data: dict,
 # EVALUATION FUNCTION (metrics keys aligned to MARXEFE CSV schema)
 # ============================================================================
 
-def evaluate_candidate(params_np, target_velocity, robot_mass, optimizer_name, seed, trial_idx):
+def evaluate_candidate(params_np, target_velocity, robot_mass, optimizer_name, seed, trial_idx,
+                       trial_duration: float = 4.5):
     """Evaluate candidate parameters and return standardized metrics.
 
     ``target_velocity`` is the forward speed set-point v*_x [m/s] tracked by the
-    objective (Zhang et al. eq. 9).
+    objective (Zhang et al. eq. 9). ``trial_duration`` is the rollout length in
+    seconds (default 4.5, the validated episode; the objective's 1.5 s transition
+    window is unchanged so the steady-state window grows with the rollout).
     """
     sim_start = time.time()
 
-    trial_data = run_cpg_trial(params_np, target_velocity, context_mode="flat", robot_mass=robot_mass)
+    trial_data = run_cpg_trial(params_np, target_velocity, context_mode="flat",
+                               robot_mass=robot_mass, trial_duration=trial_duration)
     sim_time_sec = time.time() - sim_start
 
     J = compute_objective(trial_data, target_velocity, robot_mass)
@@ -852,6 +856,7 @@ def bo_optimize_cpg(
     beta_min: float = 1.0,
     n_decay_start: int = 40,
     gamma: float = 0.9,
+    trial_duration: float = 4.5,
 ) -> tuple:
     """Bayesian Optimization loop with standardized CSV logging."""
     global quadruped
@@ -932,7 +937,8 @@ def bo_optimize_cpg(
         x_np = rng.uniform(bo.lower.numpy(), bo.upper.numpy())
 
         J, metrics = evaluate_candidate(x_np, target_velocity, robot_mass,
-                                        optimizer_name, seed, i + 1)
+                                        optimizer_name, seed, i + 1,
+                                        trial_duration=trial_duration)
 
         metrics["opttimesec"]   = 0.0
         metrics["totaltimesec"] = metrics["simtimesec"]
@@ -977,7 +983,8 @@ def bo_optimize_cpg(
         opt_time_sec = time.time() - opt_start
 
         J_next, metrics = evaluate_candidate(x_next_np, target_velocity, robot_mass,
-                                             optimizer_name, seed, t + 1)
+                                             optimizer_name, seed, t + 1,
+                                             trial_duration=trial_duration)
 
         metrics["opttimesec"]   = opt_time_sec
         metrics["totaltimesec"] = opt_time_sec + metrics["simtimesec"]

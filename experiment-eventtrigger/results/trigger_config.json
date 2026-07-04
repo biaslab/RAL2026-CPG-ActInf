@@ -1,0 +1,8 @@
+{
+  "k_sigma": 16.0,
+  "fp": 0,
+  "miss": 0,
+  "delay_mean": 0.332,
+  "delay_max": 1.31,
+  "early_on_slope_runs": 3
+}

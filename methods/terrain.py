@@ -54,9 +54,14 @@ def build_ground(p):
         return _ground_id
     if kind == "sloped":
         # Single ramp: flat until slope_start_y, then up at slope_deg.
+        # n_cols sets the forward (Y) extent of the heightfield (n_cols * 0.05 m,
+        # centred on y=0); raise it for long rollouts so the robot does not walk
+        # off the ramp (default 512 -> ±12.8 m).
         segs = [(float(TERRAIN_CONFIG.get("slope_start_y", 2.0)),
                  float(TERRAIN_CONFIG.get("slope_deg", 10.0)))]
-        _ground_id = _build_heightfield(p, _piecewise_height_fn(segs))
+        _ground_id = _build_heightfield(
+            p, _piecewise_height_fn(segs),
+            n_cols=int(TERRAIN_CONFIG.get("n_cols", 512)))
         return _ground_id
     if kind == "multislope":
         # Piecewise terrain: list of (y_start, slope_deg) segments. Slope is 0

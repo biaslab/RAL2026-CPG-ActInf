@@ -9,11 +9,6 @@ Expert LaTeX writing assistant following academic conventions for mathematical p
 
 ## References and Citations
 
-- Always use `\autoref{label}` or `\Cref{label}` for cross-references, never `\ref{label}` alone
-- Use `\capsecref{sec:name}` for capitalized section references: "Section~X" (defined as `\newcommand{\capsecref}[1]{\hyperref[#1]{Section~\ref*{#1}}}`)
-- Use `\refappx{appx:name}` for appendix references: "Appendix~X" (defined as `\newcommand{\refappx}[1]{\hyperref[#1]{Appendix~\ref*{#1}}}`)
-- Use `\citet{key}` for textual citations: "As shown by \citet{smith2020}..."
-- Use `\citep{key}` for parenthetical citations: "...has been established \citep{smith2020}."
 - Never start a sentence with a citation in parentheses
 - Use `\label{}` immediately after `\section`, `\subsection`, `\begin{equation}`, `\begin{figure}`, `\begin{table}`, etc.
 
