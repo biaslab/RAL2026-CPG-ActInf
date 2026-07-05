@@ -257,7 +257,8 @@ class MARXAgent:
 
         return J
 
-    def _build_efe_solver(self, lambda_energy, max_iter, tol, verbose):
+    def _build_efe_solver(self, lambda_energy, max_iter, tol, verbose,
+                          epistemic=True):
         """Build (once) a parametric IPOPT solver for the EFE problem.
 
         The posterior constants (Mᵀ, Λ⁻¹, eta, logdet Ω⁻¹, tr[S⁻¹Ω]) and the AR
@@ -265,7 +266,15 @@ class MARXAgent:
         across timesteps / trials — only the numeric `p` and the warm-start `x0`
         change. The goal and control-prior terms are fixed at construction, so
         they are baked in as constants. Rebuilt only if the signature (horizon,
-        dims, lambda_energy, max_iter, tol) changes.
+        dims, lambda_energy, max_iter, tol, epistemic) changes.
+
+        `epistemic` toggles the information-seeking (uncertainty-dependent) part
+        of the EFE. With `epistemic=True` (default) the full EFE is used: the
+        mutual-information / ambiguity term (functions of the predictive scale
+        Σ_t) plus the goal cross-entropy. With `epistemic=False` those Σ_t-
+        dependent terms are dropped, leaving a plain goal-seeking MAP predictive
+        controller (goal-mean deviation + control prior) — the ablation baseline
+        that isolates what the active-inference machinery contributes.
         """
         Du, Dy, thorizon, Dx = self.Du, self.Dy, self.thorizon, self.Dx
         Wu = self.ubuffer.shape[1]      # delay_inp + 1
@@ -299,13 +308,20 @@ class MARXAgent:
             ubuf = ca.horzcat(u_t, ubuf[:, :-1])
             x_t = ca.vertcat(ca.reshape(ubuf.T, -1, 1), ca.reshape(ybuf.T, -1, 1))
             scale = 1.0 + (x_t.T @ inv_L @ x_t)
-            mi = Dy * ca.log(eta) - Dy * ca.log(scale) + logdet
             mu_t = M_T @ x_t
             diff = mu_t - m_star
-            ce = 0.5 * (scale / (eta - 2) * trv + diff.T @ inv_S_star @ diff)
             up_diff = u_t - mu_prior
             cp = 0.5 * (up_diff.T @ Upsilon @ up_diff)
-            J = J + mi + ce + cp
+            if epistemic:
+                # full EFE: information-seeking (ambiguity, ∝ Σ_t) + goal terms
+                mi = Dy * ca.log(eta) - Dy * ca.log(scale) + logdet
+                ce = 0.5 * (scale / (eta - 2) * trv + diff.T @ inv_S_star @ diff)
+                J = J + mi + ce + cp
+            else:
+                # greedy MAP: drop the Σ_t-dependent (info-seeking) terms,
+                # keeping only the goal-mean deviation and the control prior
+                ce = 0.5 * (diff.T @ inv_S_star @ diff)
+                J = J + ce + cp
             if lambda_energy != 0.0:
                 J = J + lambda_energy * (u_t.T @ u_t)
             ybuf = ca.horzcat(mu_t, ybuf[:, :-1])
@@ -324,27 +340,31 @@ class MARXAgent:
         self._efe_solver = ca.nlpsol(
             'efe_solver', 'ipopt', {'x': u, 'f': J, 'p': p_sym}, opts)
         self._efe_sig = (thorizon, Du, Dy, Dx, Wu, Wy,
-                         float(lambda_energy), int(max_iter), float(tol), bool(verbose))
+                         float(lambda_energy), int(max_iter), float(tol),
+                         bool(verbose), bool(epistemic))
 
     def minimizeEFE(self, u_0=None, verbose=False, control_lims=(-np.inf, np.inf),
-                    lambda_energy=0.0, max_iter=100, tol=1e-3, warm_start=True):
+                    lambda_energy=0.0, max_iter=100, tol=1e-3, warm_start=True,
+                    epistemic=True):
         """Minimize EFE via a cached, warm-started parametric IPOPT solver.
 
         The compiled solver is built once per (horizon, dims, lambda_energy,
-        max_iter, tol) and reused; each call only updates the numeric parameters
-        (posterior constants + AR buffers) and the warm-start point. Warm start
-        is, in priority: explicit `u_0` → the previous solution → the control
-        prior mean. Returns the flat optimal control sequence (length
+        max_iter, tol, epistemic) and reused; each call only updates the numeric
+        parameters (posterior constants + AR buffers) and the warm-start point.
+        Warm start is, in priority: explicit `u_0` → the previous solution →
+        the control prior mean. Returns the flat optimal control sequence (length
         thorizon*Du). `control_lims` is a single (lo, hi) tuple or a per-dim list.
+        `epistemic=False` drops the information-seeking terms (greedy-MAP ablation).
         """
         Du, thorizon = self.Du, self.thorizon
         n_u = thorizon * Du
 
         sig = (thorizon, Du, self.Dy, self.Dx, self.ubuffer.shape[1],
                self.ybuffer.shape[1], float(lambda_energy), int(max_iter),
-               float(tol), bool(verbose))
+               float(tol), bool(verbose), bool(epistemic))
         if self._efe_solver is None or self._efe_sig != sig:
-            self._build_efe_solver(lambda_energy, max_iter, tol, verbose)
+            self._build_efe_solver(lambda_energy, max_iter, tol, verbose,
+                                   epistemic=epistemic)
 
         if (isinstance(control_lims, tuple) and len(control_lims) == 2
                 and np.isscalar(control_lims[0])):

@@ -1,0 +1,156 @@
+incumbent (flat-opt): [4.0, 11.415, 25.0, 60.0, 0.5, 0.1, 0.5, 10.0]
+oracle (sloped-opt) : [12.0, 10.0, 25.0, 60.0, 0.438, 0.1, 0.5, 1.685]
+trigger K = 16.0, trust_radius = 0.25, arms = ['noadapt', 'oracle', 'grid', 'bo', 'marxefe']
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+[  1/100] seed   5 trig=10.93s  noadapt:FELL surv= 5.7s J=-0.92 oracle:FELL surv= 9.8s J=-0.57 grid:FELL surv= 5.4s J=-0.91 bo:FELL surv= 5.3s J=-0.90 marxefe:FELL surv= 6.2s J=-1.00
+[  2/100] seed   1 trig=10.26s  noadapt:FELL surv=19.0s J=-0.43 oracle:ok surv=20.0s J=-0.21 grid:FELL surv= 8.3s J=-0.70 bo:FELL surv=11.1s J=-0.52 marxefe:FELL surv= 8.1s J=-0.84
+[  3/100] seed   8 trig= 9.96s  noadapt:FELL surv= 6.4s J=-1.00 oracle:FELL surv=16.9s J=-0.39 grid:FELL surv= 5.2s J=-0.91 bo:FELL surv= 5.0s J=-0.90 marxefe:ok surv=20.0s J=-0.21
+[  4/100] seed   4 trig=10.20s  noadapt:FELL surv= 6.7s J=-0.79 oracle:ok surv=20.0s J=-0.14 grid:FELL surv= 5.5s J=-0.73 bo:FELL surv= 5.7s J=-0.71 marxefe:ok surv=20.0s J=-0.19
+[  5/100] seed   6 trig= 9.97s  noadapt:FELL surv=18.4s J=-0.40 oracle:FELL surv=15.9s J=-0.36 grid:FELL surv=10.3s J=-0.50 bo:FELL surv= 7.6s J=-0.71 marxefe:FELL surv=14.0s J=-0.49
+[  6/100] seed   0 trig=10.13s  noadapt:ok surv=20.0s J=-0.16 oracle:FELL surv=11.6s J=-0.50 grid:FELL surv=17.2s J=-0.35 bo:ok surv=20.0s J=-0.12 marxefe:ok surv=20.0s J=-0.17
+[  7/100] seed   3 trig= 9.95s  noadapt:ok surv=20.0s J=-0.25 oracle:ok surv=20.0s J=-0.10 grid:FELL surv=13.9s J=-0.44 bo:FELL surv= 8.5s J=-0.57 marxefe:FELL surv=19.8s J=-0.41
+[  8/100] seed   9 trig=10.40s  noadapt:ok surv=20.0s J=-0.16 oracle:FELL surv= 7.6s J=-0.92 grid:FELL surv=17.5s J=-0.34 bo:FELL surv=17.5s J=-0.35 marxefe:ok surv=20.0s J=-0.19
+[  9/100] seed   2 trig=10.35s  noadapt:ok surv=20.0s J=-0.17 oracle:FELL surv=19.5s J=-0.29 grid:FELL surv=16.1s J=-0.34 bo:FELL surv=13.6s J=-0.52 marxefe:ok surv=20.0s J=-0.24
+[ 10/100] seed   7 trig=10.35s  noadapt:ok surv=20.0s J=-0.19 oracle:FELL surv=18.1s J=-0.47 grid:ok surv=20.0s J=-0.20 bo:ok surv=20.0s J=-0.18 marxefe:ok surv=20.0s J=-0.17
+[ 11/100] seed  10 trig=10.24s  noadapt:ok surv=20.0s J=-0.20 oracle:ok surv=20.0s J=-0.16 grid:FELL surv=11.3s J=-0.51 bo:FELL surv=16.2s J=-0.37 marxefe:ok surv=20.0s J=-0.14
+pybullet build time: May  4 2026 18:19:53
+[ 12/100] seed  11 trig=10.39s  noadapt:FELL surv= 6.1s J=-1.03 oracle:ok surv=20.0s J=-0.12 grid:FELL surv= 6.8s J=-0.79 bo:FELL surv= 6.0s J=-0.80 marxefe:ok surv=20.0s J=-0.22
+pybullet build time: May  4 2026 18:19:53
+[ 13/100] seed  13 trig=10.11s  noadapt:FELL surv=19.9s J=-0.45 oracle:ok surv=20.0s J=-0.11 grid:FELL surv=11.1s J=-0.61 bo:FELL surv=17.0s J=-0.36 marxefe:ok surv=20.0s J=-0.16
+[ 14/100] seed  12 trig=10.32s  noadapt:ok surv=20.0s J=-0.19 oracle:ok surv=20.0s J=-0.15 grid:ok surv=20.0s J=-0.18 bo:FELL surv=17.4s J=-0.36 marxefe:ok surv=20.0s J=-0.18
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+[ 15/100] seed  14 trig=10.41s  noadapt:ok surv=20.0s J=-0.20 oracle:ok surv=20.0s J=-0.15 grid:FELL surv=11.0s J=-0.53 bo:FELL surv=13.0s J=-0.46 marxefe:ok surv=20.0s J=-0.16
+pybullet build time: May  4 2026 18:19:53
+[ 16/100] seed  19 trig=10.34s  noadapt:FELL surv=19.3s J=-0.37 oracle:ok surv=20.0s J=-0.14 grid:FELL surv= 7.1s J=-0.65 bo:FELL surv= 7.5s J=-0.88 marxefe:FELL surv=16.9s J=-0.42
+[ 17/100] seed  15 trig=10.35s  noadapt:FELL surv=19.9s J=-0.40 oracle:ok surv=20.0s J=-0.19 grid:FELL surv=10.0s J=-0.58 bo:FELL surv=15.8s J=-0.40 marxefe:ok surv=20.0s J=-0.24
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+[ 18/100] seed  17 trig=10.15s  noadapt:ok surv=20.0s J=-0.16 oracle:ok surv=20.0s J=-0.11 grid:ok surv=20.0s J=-0.14 bo:FELL surv=13.8s J=-0.48 marxefe:ok surv=20.0s J=-0.15
+pybullet build time: May  4 2026 18:19:53
+[ 19/100] seed  18 trig=10.52s  noadapt:ok surv=20.0s J=-0.15 oracle:FELL surv=15.7s J=-0.40 grid:FELL surv=16.9s J=-0.41 bo:FELL surv= 8.4s J=-0.55 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 20/100] seed  16 trig=11.31s  noadapt:ok surv=20.0s J=-0.18 oracle:ok surv=20.0s J=-0.19 grid:FELL surv= 9.2s J=-0.64 bo:FELL surv=19.2s J=-0.31 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 21/100] seed  21 trig=10.59s  noadapt:ok surv=20.0s J=-0.15 oracle:ok surv=20.0s J=-0.16 grid:ok surv=20.0s J=-0.17 bo:FELL surv=13.8s J=-0.46 marxefe:ok surv=20.0s J=-0.16
+[ 22/100] seed  20 trig=10.43s  noadapt:ok surv=20.0s J=-0.15 oracle:FELL surv=15.7s J=-0.43 grid:ok surv=20.0s J=-0.12 bo:FELL surv=14.1s J=-0.43 marxefe:ok surv=20.0s J=-0.16
+[ 23/100] seed  25 trig=10.42s  noadapt:ok surv=20.0s J=-0.14 oracle:FELL surv=14.4s J=-0.41 grid:FELL surv=11.0s J=-0.54 bo:FELL surv=12.9s J=-0.42 marxefe:ok surv=20.0s J=-0.16
+[ 24/100] seed  22 trig=11.21s  noadapt:ok surv=20.0s J=-0.18 oracle:FELL surv= 5.5s J=-0.80 grid:FELL surv=12.5s J=-0.46 bo:FELL surv=13.1s J=-0.38 marxefe:FELL surv=19.4s J=-0.33
+[ 25/100] seed  26 trig=10.55s  noadapt:FELL surv=18.7s J=-0.41 oracle:FELL surv=10.4s J=-0.50 grid:FELL surv= 8.3s J=-0.58 bo:FELL surv= 7.8s J=-0.82 marxefe:FELL surv=16.6s J=-0.50
+[ 26/100] seed  23 trig=10.79s  noadapt:ok surv=20.0s J=-0.23 oracle:ok surv=20.0s J=-0.15 grid:FELL surv=11.1s J=-0.52 bo:FELL surv=11.6s J=-0.51 marxefe:FELL surv=17.8s J=-0.41
+[ 27/100] seed  24 trig=10.50s  noadapt:ok surv=20.0s J=-0.16 oracle:FELL surv=13.0s J=-0.41 grid:ok surv=20.0s J=-0.13 bo:ok surv=20.0s J=-0.17 marxefe:FELL surv= 7.6s J=-0.93
+[ 28/100] seed  27 trig=10.22s  noadapt:FELL surv=11.9s J=-0.49 oracle:FELL surv=18.3s J=-0.39 grid:FELL surv= 7.9s J=-0.66 bo:FELL surv= 9.5s J=-0.59 marxefe:FELL surv= 6.9s J=-0.80
+[ 29/100] seed  29 trig=10.25s  noadapt:ok surv=20.0s J=-0.14 oracle:ok surv=20.0s J=-0.10 grid:FELL surv=12.4s J=-0.48 bo:FELL surv=15.4s J=-0.45 marxefe:FELL surv=15.1s J=-0.61
+[ 30/100] seed  28 trig=10.43s  noadapt:ok surv=20.0s J=-0.19 oracle:ok surv=20.0s J=-0.13 grid:FELL surv=15.0s J=-0.53 bo:ok surv=20.0s J=-0.13 marxefe:ok surv=20.0s J=-0.18
+[ 31/100] seed  31 trig=10.40s  noadapt:FELL surv= 6.0s J=-0.79 oracle:ok surv=20.0s J=-0.11 grid:FELL surv= 5.0s J=-0.77 bo:FELL surv= 5.2s J=-0.78 marxefe:FELL surv= 8.3s J=-0.76
+pybullet build time: May  4 2026 18:19:53
+[ 32/100] seed  30 trig=10.35s  noadapt:FELL surv=12.9s J=-0.51 oracle:ok surv=20.0s J=-0.13 grid:FELL surv=13.0s J=-0.41 bo:FELL surv= 9.9s J=-0.54 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 33/100] seed  37 trig=10.16s  noadapt:FELL surv=11.7s J=-0.55 oracle:FELL surv=13.3s J=-0.38 grid:FELL surv=14.4s J=-0.45 bo:FELL surv= 7.3s J=-0.70 marxefe:FELL surv= 8.6s J=-0.68
+pybullet build time: May  4 2026 18:19:53
+[ 34/100] seed  34 trig=10.17s  noadapt:FELL surv=13.4s J=-0.43 oracle:FELL surv= 6.8s J=-0.73 grid:FELL surv= 7.2s J=-0.68 bo:FELL surv=12.9s J=-0.44 marxefe:FELL surv=18.2s J=-0.46
+pybullet build time: May  4 2026 18:19:53
+[ 35/100] seed  33 trig=10.56s  noadapt:ok surv=20.0s J=-0.17 oracle:FELL surv=16.5s J=-0.48 grid:FELL surv= 8.6s J=-0.57 bo:FELL surv= 9.7s J=-0.59 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 36/100] seed  36 trig=10.25s  noadapt:ok surv=20.0s J=-0.17 oracle:ok surv=20.0s J=-0.15 grid:ok surv=20.0s J=-0.17 bo:FELL surv= 9.3s J=-0.64 marxefe:ok surv=20.0s J=-0.15
+[ 37/100] seed  35 trig=10.42s  noadapt:ok surv=20.0s J=-0.16 oracle:FELL surv= 8.9s J=-0.57 grid:ok surv=20.0s J=-0.12 bo:ok surv=20.0s J=-0.18 marxefe:ok surv=20.0s J=-0.16
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+[ 38/100] seed  32 trig=10.62s  noadapt:ok surv=20.0s J=-0.16 oracle:ok surv=20.0s J=-0.14 grid:ok surv=20.0s J=-0.21 bo:ok surv=20.0s J=-0.16 marxefe:ok surv=20.0s J=-0.21
+pybullet build time: May  4 2026 18:19:53
+[ 39/100] seed  38 trig=10.65s  noadapt:FELL surv=12.0s J=-0.59 oracle:ok surv=20.0s J=-0.15 grid:FELL surv=10.9s J=-0.53 bo:FELL surv=16.6s J=-0.50 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 40/100] seed  39 trig=10.34s  noadapt:ok surv=20.0s J=-0.16 oracle:ok surv=20.0s J=-0.18 grid:FELL surv=15.2s J=-0.46 bo:FELL surv=19.1s J=-0.30 marxefe:ok surv=20.0s J=-0.18
+pybullet build time: May  4 2026 18:19:53
+[ 41/100] seed  41 trig=10.40s  noadapt:FELL surv=14.0s J=-0.48 oracle:FELL surv=19.2s J=-0.30 grid:FELL surv= 7.7s J=-0.77 bo:FELL surv= 6.7s J=-0.77 marxefe:FELL surv=16.0s J=-0.43
+[ 42/100] seed  40 trig=10.06s  noadapt:ok surv=20.0s J=-0.17 oracle:ok surv=20.0s J=-0.11 grid:FELL surv=16.1s J=-0.37 bo:FELL surv= 8.5s J=-0.52 marxefe:ok surv=20.0s J=-0.16
+[ 43/100] seed  42 trig=10.78s  noadapt:FELL surv= 4.7s J=-1.25 oracle:FELL surv= 5.2s J=-0.86 grid:FELL surv= 4.2s J=-1.16 bo:FELL surv= 4.3s J=-1.16 marxefe:FELL surv=17.6s J=-0.41
+[ 44/100] seed  43 trig=10.40s  noadapt:ok surv=20.0s J=-0.21 oracle:FELL surv= 6.6s J=-0.78 grid:FELL surv=13.5s J=-0.58 bo:FELL surv=11.6s J=-0.44 marxefe:ok surv=20.0s J=-0.18
+[ 45/100] seed  46 trig=10.23s  noadapt:FELL surv= 6.6s J=-0.84 oracle:ok surv=20.0s J=-0.12 grid:FELL surv= 5.4s J=-0.79 bo:FELL surv= 6.9s J=-0.75 marxefe:FELL surv= 7.2s J=-0.72
+[ 46/100] seed  44 trig=10.23s  noadapt:FELL surv=18.6s J=-0.41 oracle:ok surv=20.0s J=-0.14 grid:ok surv=20.0s J=-0.16 bo:FELL surv=19.4s J=-0.39 marxefe:FELL surv=15.5s J=-0.55
+[ 47/100] seed  48 trig=10.35s  noadapt:FELL surv= 6.6s J=-0.87 oracle:FELL surv=12.6s J=-0.48 grid:FELL surv= 6.6s J=-0.76 bo:FELL surv= 6.7s J=-0.73 marxefe:ok surv=20.0s J=-0.28
+[ 48/100] seed  45 trig=10.23s  noadapt:ok surv=20.0s J=-0.20 oracle:ok surv=20.0s J=-0.13 grid:FELL surv=18.3s J=-0.52 bo:FELL surv= 9.6s J=-0.74 marxefe:FELL surv=19.3s J=-0.45
+[ 49/100] seed  47 trig=10.57s  noadapt:ok surv=20.0s J=-0.17 oracle:ok surv=20.0s J=-0.12 grid:FELL surv= 9.7s J=-0.69 bo:FELL surv=18.2s J=-0.45 marxefe:ok surv=20.0s J=-0.23
+[ 50/100] seed  49 trig=10.19s  noadapt:ok surv=20.0s J=-0.17 oracle:ok surv=20.0s J=-0.13 grid:FELL surv=13.9s J=-0.46 bo:FELL surv=13.2s J=-0.44 marxefe:ok surv=20.0s J=-0.17
+[ 51/100] seed  51 trig=10.91s  noadapt:FELL surv=14.6s J=-0.51 oracle:ok surv=20.0s J=-0.15 grid:FELL surv= 5.1s J=-0.93 bo:FELL surv= 7.1s J=-0.83 marxefe:ok surv=20.0s J=-0.16
+[ 52/100] seed  50 trig= 9.88s  noadapt:ok surv=20.0s J=-0.16 oracle:FELL surv=18.3s J=-0.40 grid:ok surv=20.0s J=-0.13 bo:FELL surv=13.6s J=-0.54 marxefe:FELL surv=16.9s J=-0.47
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+[ 53/100] seed  52 trig=10.40s  noadapt:ok surv=20.0s J=-0.18 oracle:FELL surv=11.0s J=-0.55 grid:FELL surv=13.9s J=-0.51 bo:FELL surv=19.2s J=-0.29 marxefe:ok surv=20.0s J=-0.22
+pybullet build time: May  4 2026 18:19:53
+[ 54/100] seed  53 trig=10.24s  noadapt:FELL surv= 7.7s J=-0.91 oracle:FELL surv=14.5s J=-0.42 grid:FELL surv= 5.2s J=-0.94 bo:FELL surv= 7.1s J=-0.73 marxefe:FELL surv=17.2s J=-0.44
+pybullet build time: May  4 2026 18:19:53
+[ 55/100] seed  54 trig=10.20s  noadapt:ok surv=20.0s J=-0.18 oracle:ok surv=20.0s J=-0.12 grid:FELL surv=12.0s J=-0.60 bo:FELL surv=11.1s J=-0.53 marxefe:ok surv=20.0s J=-0.16
+pybullet build time: May  4 2026 18:19:53
+[ 56/100] seed  55 trig=10.24s  noadapt:ok surv=20.0s J=-0.17 oracle:ok surv=20.0s J=-0.11 grid:FELL surv=14.5s J=-0.41 bo:FELL surv=13.7s J=-0.49 marxefe:FELL surv=15.1s J=-0.51
+pybullet build time: May  4 2026 18:19:53
+[ 57/100] seed  56 trig=10.14s  noadapt:ok surv=20.0s J=-0.18 oracle:ok surv=20.0s J=-0.17 grid:FELL surv=10.8s J=-0.56 bo:FELL surv=11.8s J=-0.48 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 58/100] seed  59 trig=10.41s  noadapt:ok surv=20.0s J=-0.16 oracle:ok surv=20.0s J=-0.17 grid:FELL surv= 8.3s J=-0.63 bo:FELL surv=11.2s J=-0.49 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 59/100] seed  58 trig=10.38s  noadapt:ok surv=20.0s J=-0.15 oracle:ok surv=20.0s J=-0.13 grid:FELL surv=13.5s J=-0.48 bo:FELL surv=11.6s J=-0.44 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 60/100] seed  57 trig=10.10s  noadapt:ok surv=20.0s J=-0.17 oracle:ok surv=20.0s J=-0.15 grid:FELL surv= 7.8s J=-0.69 bo:FELL surv=14.2s J=-0.46 marxefe:ok surv=20.0s J=-0.16
+pybullet build time: May  4 2026 18:19:53
+[ 61/100] seed  61 trig=10.37s  noadapt:FELL surv= 5.2s J=-0.94 oracle:FELL surv=19.3s J=-0.31 grid:FELL surv= 4.7s J=-1.14 bo:FELL surv= 4.6s J=-1.18 marxefe:FELL surv=17.0s J=-0.41
+[ 62/100] seed  60 trig=10.36s  noadapt:ok surv=20.0s J=-0.15 oracle:FELL surv=18.1s J=-0.43 grid:FELL surv=18.9s J=-0.36 bo:ok surv=20.0s J=-0.16 marxefe:ok surv=20.0s J=-0.19
+[ 63/100] seed  62 trig=10.30s  noadapt:ok surv=20.0s J=-0.16 oracle:FELL surv=18.6s J=-0.35 grid:FELL surv=19.7s J=-0.42 bo:FELL surv=14.0s J=-0.44 marxefe:ok surv=20.0s J=-0.19
+[ 64/100] seed  63 trig= 9.95s  noadapt:ok surv=20.0s J=-0.25 oracle:FELL surv=14.4s J=-0.40 grid:ok surv=20.0s J=-0.24 bo:FELL surv=12.7s J=-0.45 marxefe:FELL surv=15.3s J=-0.49
+[ 65/100] seed  65 trig=10.12s  noadapt:FELL surv= 5.2s J=-0.85 oracle:FELL surv=15.7s J=-0.38 grid:FELL surv= 6.5s J=-0.76 bo:FELL surv= 4.8s J=-0.94 marxefe:FELL surv=14.4s J=-0.45
+[ 66/100] seed  64 trig=10.24s  noadapt:ok surv=20.0s J=-0.15 oracle:ok surv=20.0s J=-0.13 grid:FELL surv=11.0s J=-0.54 bo:FELL surv=11.4s J=-0.47 marxefe:FELL surv=18.4s J=-0.43
+[ 67/100] seed  66 trig=10.15s  noadapt:ok surv=20.0s J=-0.19 oracle:ok surv=20.0s J=-0.17 grid:FELL surv=10.0s J=-0.55 bo:FELL surv= 8.6s J=-0.52 marxefe:ok surv=20.0s J=-0.24
+[ 68/100] seed  67 trig=11.04s  noadapt:ok surv=20.0s J=-0.14 oracle:FELL surv=12.7s J=-0.44 grid:FELL surv=12.8s J=-0.53 bo:FELL surv=11.8s J=-0.54 marxefe:ok surv=20.0s J=-0.18
+[ 69/100] seed  68 trig=10.10s  noadapt:FELL surv=18.9s J=-0.37 oracle:ok surv=20.0s J=-0.13 grid:ok surv=20.0s J=-0.11 bo:FELL surv=13.6s J=-0.54 marxefe:ok surv=20.0s J=-0.20
+[ 70/100] seed  70 trig=10.44s  noadapt:ok surv=20.0s J=-0.17 oracle:FELL surv=13.6s J=-0.56 grid:FELL surv=15.8s J=-0.42 bo:FELL surv=13.0s J=-0.46 marxefe:FELL surv= 6.1s J=-0.97
+pybullet build time: May  4 2026 18:19:53
+[ 71/100] seed  69 trig=10.37s  noadapt:ok surv=20.0s J=-0.17 oracle:ok surv=20.0s J=-0.19 grid:ok surv=20.0s J=-0.20 bo:ok surv=20.0s J=-0.14 marxefe:ok surv=20.0s J=-0.17
+[ 72/100] seed  73 trig=10.13s  noadapt:FELL surv=18.8s J=-0.40 oracle:ok surv=20.0s J=-0.12 grid:FELL surv=10.7s J=-0.65 bo:ok surv=20.0s J=-0.15 marxefe:FELL surv= 7.9s J=-0.81
+pybullet build time: May  4 2026 18:19:53
+[ 73/100] seed  71 trig=10.88s  noadapt:ok surv=20.0s J=-0.20 oracle:FELL surv=17.3s J=-0.38 grid:FELL surv=13.5s J=-0.43 bo:FELL surv= 7.7s J=-0.74 marxefe:ok surv=20.0s J=-0.22
+pybullet build time: May  4 2026 18:19:53
+[ 74/100] seed  74 trig=10.38s  noadapt:ok surv=20.0s J=-0.25 oracle:FELL surv=16.4s J=-0.35 grid:FELL surv=14.3s J=-0.44 bo:FELL surv= 9.1s J=-0.78 marxefe:FELL surv=13.8s J=-0.57
+pybullet build time: May  4 2026 18:19:53
+[ 75/100] seed  75 trig= 9.83s  noadapt:ok surv=20.0s J=-0.19 oracle:ok surv=20.0s J=-0.11 grid:ok surv=20.0s J=-0.20 bo:FELL surv=12.8s J=-0.51 marxefe:ok surv=20.0s J=-0.16
+[ 76/100] seed  72 trig=10.25s  noadapt:ok surv=20.0s J=-0.16 oracle:ok surv=20.0s J=-0.14 grid:ok surv=20.0s J=-0.20 bo:FELL surv=18.8s J=-0.38 marxefe:ok surv=20.0s J=-0.19
+pybullet build time: May  4 2026 18:19:53
+pybullet build time: May  4 2026 18:19:53
+[ 77/100] seed  76 trig=10.10s  noadapt:ok surv=20.0s J=-0.15 oracle:FELL surv=17.1s J=-0.36 grid:FELL surv=10.5s J=-0.46 bo:FELL surv=12.3s J=-0.50 marxefe:FELL surv=19.9s J=-0.41
+pybullet build time: May  4 2026 18:19:53
+[ 78/100] seed  78 trig= 9.95s  noadapt:FELL surv= 7.0s J=-0.79 oracle:FELL surv=18.7s J=-0.31 grid:FELL surv= 4.9s J=-1.01 bo:FELL surv= 4.7s J=-1.08 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 79/100] seed  80 trig=10.23s  noadapt:ok surv=20.0s J=-0.18 oracle:ok surv=20.0s J=-0.15 grid:FELL surv= 8.5s J=-0.53 bo:FELL surv=15.4s J=-0.40 marxefe:ok surv=20.0s J=-0.19
+pybullet build time: May  4 2026 18:19:53
+[ 80/100] seed  77 trig=10.40s  noadapt:ok surv=20.0s J=-0.15 oracle:FELL surv=13.8s J=-0.44 grid:FELL surv=13.3s J=-0.38 bo:FELL surv=18.8s J=-0.33 marxefe:ok surv=20.0s J=-0.17
+pybullet build time: May  4 2026 18:19:53
+[ 81/100] seed  79 trig= 9.94s  noadapt:ok surv=20.0s J=-0.15 oracle:ok surv=20.0s J=-0.11 grid:ok surv=20.0s J=-0.11 bo:FELL surv=10.5s J=-0.56 marxefe:FELL surv=18.9s J=-0.41
+[ 82/100] seed  82 trig=10.39s  noadapt:FELL surv= 8.9s J=-0.64 oracle:FELL surv=15.3s J=-0.44 grid:FELL surv= 5.0s J=-0.96 bo:FELL surv= 6.4s J=-0.85 marxefe:ok surv=20.0s J=-0.17
+[ 83/100] seed  85 trig=10.26s  noadapt:FELL surv= 8.2s J=-0.77 oracle:FELL surv=16.1s J=-0.38 grid:FELL surv= 4.7s J=-0.99 bo:FELL surv= 5.2s J=-0.78 marxefe:FELL surv=17.3s J=-0.40
+[ 84/100] seed  81 trig=10.36s  noadapt:ok surv=20.0s J=-0.16 oracle:FELL surv=14.2s J=-0.41 grid:FELL surv=16.9s J=-0.38 bo:FELL surv=17.1s J=-0.30 marxefe:ok surv=20.0s J=-0.18
+[ 85/100] seed  83 trig=10.24s  noadapt:ok surv=20.0s J=-0.16 oracle:FELL surv=19.3s J=-0.30 grid:FELL surv=13.8s J=-0.53 bo:FELL surv=15.0s J=-0.51 marxefe:ok surv=20.0s J=-0.18
+[ 86/100] seed  84 trig=10.39s  noadapt:ok surv=20.0s J=-0.14 oracle:ok surv=20.0s J=-0.15 grid:FELL surv= 8.6s J=-0.54 bo:ok surv=20.0s J=-0.13 marxefe:ok surv=20.0s J=-0.16
+[ 87/100] seed  87 trig=10.22s  noadapt:FELL surv=18.1s J=-0.46 oracle:FELL surv=17.0s J=-0.39 grid:FELL surv=12.2s J=-0.50 bo:FELL surv=13.4s J=-0.41 marxefe:FELL surv=12.3s J=-0.60
+[ 88/100] seed  88 trig=10.93s  noadapt:FELL surv= 5.6s J=-0.89 oracle:FELL surv= 4.8s J=-1.12 grid:FELL surv= 4.7s J=-1.08 bo:FELL surv= 4.6s J=-1.16 marxefe:FELL surv=13.6s J=-0.57
+[ 89/100] seed  86 trig=10.39s  noadapt:FELL surv=20.0s J=-0.41 oracle:ok surv=20.0s J=-0.15 grid:FELL surv=16.1s J=-0.33 bo:FELL surv=13.6s J=-0.56 marxefe:ok surv=20.0s J=-0.22
+[ 90/100] seed  90 trig=10.50s  noadapt:FELL surv= 5.3s J=-0.95 oracle:ok surv=20.0s J=-0.11 grid:FELL surv= 5.2s J=-0.91 bo:FELL surv= 5.0s J=-0.97 marxefe:ok surv=20.0s J=-0.21
+pybullet build time: May  4 2026 18:19:53
+[ 91/100] seed  89 trig=10.43s  noadapt:ok surv=20.0s J=-0.18 oracle:ok surv=20.0s J=-0.14 grid:FELL surv= 8.0s J=-0.73 bo:FELL surv=13.6s J=-0.58 marxefe:ok surv=20.0s J=-0.17
+[ 92/100] seed  91 trig=10.69s  noadapt:FELL surv= 5.5s J=-0.89 oracle:FELL surv=15.6s J=-0.39 grid:FELL surv= 4.7s J=-1.12 bo:FELL surv= 6.0s J=-0.86 marxefe:ok surv=20.0s J=-0.20
+[ 93/100] seed  92 trig=10.08s  noadapt:FELL surv= 6.8s J=-0.80 oracle:ok surv=20.0s J=-0.13 grid:FELL surv= 6.6s J=-0.78 bo:FELL surv= 5.1s J=-0.80 marxefe:FELL surv=19.1s J=-0.36
+[ 94/100] seed  93 trig=10.19s  noadapt:FELL surv=17.5s J=-0.40 oracle:ok surv=20.0s J=-0.13 grid:FELL surv=19.5s J=-0.43 bo:FELL surv=18.7s J=-0.35 marxefe:ok surv=20.0s J=-0.16
+[ 95/100] seed  94 trig=10.44s  noadapt:ok surv=20.0s J=-0.14 oracle:ok surv=20.0s J=-0.13 grid:FELL surv=17.0s J=-0.39 bo:FELL surv=12.8s J=-0.46 marxefe:FELL surv=15.5s J=-0.51
+[ 96/100] seed  95 trig= 9.97s  noadapt:FELL surv=18.9s J=-0.36 oracle:FELL surv=13.4s J=-0.39 grid:FELL surv=11.7s J=-0.45 bo:FELL surv=12.2s J=-0.57 marxefe:FELL surv=13.0s J=-0.48
+[ 97/100] seed  97 trig=10.45s  noadapt:ok surv=20.0s J=-0.21 oracle:ok surv=20.0s J=-0.15 grid:FELL surv= 6.6s J=-0.88 bo:FELL surv=16.3s J=-0.46 marxefe:FELL surv= 8.1s J=-0.84
+[ 98/100] seed  96 trig=10.37s  noadapt:ok surv=20.0s J=-0.18 oracle:FELL surv=11.3s J=-0.46 grid:FELL surv=14.1s J=-0.50 bo:FELL surv=13.6s J=-0.65 marxefe:ok surv=20.0s J=-0.18
+[ 99/100] seed  98 trig= 9.95s  noadapt:FELL surv=15.9s J=-0.44 oracle:FELL surv=18.2s J=-0.40 grid:FELL surv=10.5s J=-0.68 bo:FELL surv= 9.6s J=-0.57 marxefe:ok surv=20.0s J=-0.19
+[100/100] seed  99 trig=10.20s  noadapt:FELL surv= 6.7s J=-0.82 oracle:ok surv=20.0s J=-0.10 grid:FELL surv= 5.8s J=-0.77 bo:FELL surv= 6.5s J=-0.82 marxefe:FELL surv=17.7s J=-0.38
+
+saved /home/synd/Wouter/Onderzoek/Projecten/tue/cpg-agent/RAL2026-CPG-ActInf/experiment-eventtrigger/results/eventtrigger_experiment.csv

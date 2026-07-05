@@ -54,16 +54,76 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 RESULTS_DIR = os.path.join(_HERE, "results")
-SELECTED_JSON = os.path.join(_REPO, "experiment-flat2sloped", "results",
-                             "selected_params.json")
+_SEL_DIR = os.path.join(_REPO, "experiment-flat2sloped", "results")
+SELECTED_JSON = os.path.join(_SEL_DIR, "selected_params.json")
 TRIGGER_JSON = os.path.join(RESULTS_DIR, "trigger_config.json")
 MAIN_CSV = os.path.join(RESULTS_DIR, "eventtrigger_experiment.csv")
+
+# Terrain registry (RA-L review M6/C2). Each entry sets the incline used by the
+# harness and the reference-optima file (incumbent = flat, oracle = that
+# terrain's optimum). The sloped family reuses the whole pipeline unchanged
+# except for the signed slope angle; friction / repeated transitions are added
+# separately. `slope_deg` may be negative (decline).
+TERRAINS = {
+    "sloped10":  dict(kind="sloped", slope_deg=10.0,  selected="selected_params.json"),
+    "incline15": dict(kind="sloped", slope_deg=15.0,  selected="selected_params_incline15.json"),
+    "incline20": dict(kind="sloped", slope_deg=20.0,  selected="selected_params_incline20.json"),
+    "decline10": dict(kind="sloped", slope_deg=-10.0, selected="selected_params_decline10.json"),
+    # Friction drop: flat ground, grip falls from BASE_MU to ICE_MU at the
+    # robot's t=10s position (placed like the slope, via find_y10). SLOPE_DEG=0
+    # so the fall check reduces to the absolute-height criterion.
+    "friction":  dict(kind="friction", slope_deg=0.0, selected="selected_params_friction.json"),
+    # Repeated transitions: a staircase of +10° ramps separated by flat
+    # landings, the first ramp at the robot's t=10s position. Tests the
+    # "continual" claim and trigger re-arming (C2). Reuses the flat incumbent
+    # and the 10° oracle (selected_params.json).
+    "repeated":  dict(kind="repeated", slope_deg=10.0, selected="selected_params.json"),
+}
+
+
+def set_terrain(name):
+    """Point the harness globals at terrain `name` (from TERRAINS). The trigger
+    threshold K is terrain-dependent (recalibrated per terrain), so TRIGGER_JSON
+    is keyed by terrain; sloped10 keeps the original trigger_config.json."""
+    global SLOPE_DEG, TERRAIN_KIND, SELECTED_JSON, TRIGGER_JSON
+    if name not in TERRAINS:
+        raise SystemExit(f"unknown terrain {name!r}; choices: {list(TERRAINS)}")
+    SLOPE_DEG = float(TERRAINS[name]["slope_deg"])
+    TERRAIN_KIND = TERRAINS[name]["kind"]
+    SELECTED_JSON = os.path.join(_SEL_DIR, TERRAINS[name]["selected"])
+    suffix = "" if name == "sloped10" else f"_{name}"
+    TRIGGER_JSON = os.path.join(RESULTS_DIR, f"trigger_config{suffix}.json")
+
+
+def set_output_tag(tag):
+    """Namespace the output CSV + figures + trigger config by `tag` (e.g. terrain
+    name), so different terrains / ablation sub-runs do not overwrite each other.
+    The empty tag keeps the original flat->10° filenames (trigger_config.json)."""
+    global MAIN_CSV, FIG_TAG
+    FIG_TAG = f"_{tag}" if tag else ""
+    MAIN_CSV = os.path.join(RESULTS_DIR, f"eventtrigger_experiment{FIG_TAG}.csv")
+
+
+FIG_TAG = ""
 
 # ── Episode / terrain ────────────────────────────────────────────────────────
 DT = 0.01
 PRE_T = 10.0              # flat walking before the slope [s]
 ADAPT_T = 20.0            # post-trigger horizon [s]
 SLOPE_DEG = 10.0
+TERRAIN_KIND = "sloped"  # "sloped", "friction", or "repeated" (set_terrain)
+BASE_MU = 0.7            # friction terrain: grip before the drop (normal)
+ICE_MU = 0.15            # friction terrain: grip after the drop (ice)
+# Repeated-transition terrain: a staircase of +SLOPE_DEG ramps of REPEAT_RAMP_LEN
+# separated by REPEAT_GAP_LEN flat landings; REPEAT_N ramps total. Each ramp
+# onset is a terrain event the trigger should re-detect.
+REPEAT_N = 2             # two +10° ramps (two transitions in one bout);
+                         # the oracle survives both but falls if a 3rd is added,
+                         # so two keeps the upper anchor meaningful
+REPEAT_RAMP_LEN = 1.5
+REPEAT_GAP_LEN = 1.5
+CUR_SEGMENTS = None      # (y_start, slope_deg) list of the active repeated
+                         # terrain, set in terrain_cfg; used by fallen_on_terrain
 N_COLS = 1600
 FAR_SLOPE_Y = 60.0
 JITTER_STD = 0.002        # same seeding scheme as experiment-flat2sloped
@@ -97,16 +157,40 @@ ARM_TIME = 3.5            # earliest allowed trigger [s]
 ARMS = ["noadapt", "oracle", "grid", "bo", "marxefe"]
 
 
-def terrain_cfg(slope_start_y):
+def terrain_cfg(change_y):
+    """Terrain whose 'change' happens at forward position `change_y` (placed at
+    the robot's t=10s position by find_y10, so every terrain fires the event in
+    the same gait phase). Slope: ramp up/down at change_y. Friction: grip drops
+    from BASE_MU to ICE_MU at change_y (ground stays flat)."""
+    global CUR_SEGMENTS
+    if TERRAIN_KIND == "friction":
+        return {"kind": "friction",
+                "zones": [(float(change_y), ICE_MU, "ice")],
+                "base_mu": BASE_MU, "n_cols": N_COLS}
+    if TERRAIN_KIND == "repeated":
+        # Staircase: +SLOPE_DEG ramp, flat landing, repeated REPEAT_N times,
+        # first ramp at change_y. Flat tail after the last ramp.
+        segs, y = [], float(change_y)
+        for _ in range(REPEAT_N):
+            segs.append((round(y, 3), SLOPE_DEG))
+            y += REPEAT_RAMP_LEN
+            segs.append((round(y, 3), 0.0))
+            y += REPEAT_GAP_LEN
+        CUR_SEGMENTS = segs
+        return {"kind": "multislope", "segments": segs, "n_cols": N_COLS}
     return {"kind": "sloped", "slope_deg": SLOPE_DEG,
-            "slope_start_y": float(slope_start_y), "n_cols": N_COLS}
+            "slope_start_y": float(change_y), "n_cols": N_COLS}
 
 
 def load_selected():
+    """Return (incumbent = flat optimum, oracle = this terrain's optimum).
+    The default flat->10° file uses key "sloped"; the per-terrain files written
+    by gen_terrain_optima.py use key "oracle"."""
     with open(SELECTED_JSON) as f:
         sel = json.load(f)
+    oracle = sel["oracle"] if "oracle" in sel else sel["sloped"]
     return (np.asarray(sel["flat"]["params"], float),
-            np.asarray(sel["sloped"]["params"], float))
+            np.asarray(oracle["params"], float))
 
 
 def _lowpass(x, w=50):
@@ -138,21 +222,41 @@ def j_stab_window(vx, roll, pitch, fell):
     return r_v - (rms_roll + rms_pitch) / ATT_REF_DEG
 
 
+def _ground_height(y, slope_start_y):
+    """Ground elevation at forward position `y` for the active terrain, so the
+    height fall-check stays valid after the robot climbs. Repeated terrain uses
+    the piecewise staircase profile; sloped uses a single ramp; friction/flat
+    are level."""
+    if TERRAIN_KIND == "repeated" and CUR_SEGMENTS:
+        from methods.terrain import _piecewise_height_fn
+        return float(_piecewise_height_fn(CUR_SEGMENTS)(np.array([float(y)]))[0])
+    return np.tan(np.deg2rad(SLOPE_DEG)) * max(0.0, y - slope_start_y)
+
+
 def fallen_on_terrain(base_pos, base_ori, slope_start_y, p):
     """Fall check with terrain-relative height (the absolute z < 0.25 criterion
     is blind once the robot has climbed; the orientation criterion is kept)."""
     rot = p.getMatrixFromQuaternion(base_ori)
     upright = np.dot([0, 0, 1], rot[6:])
-    ground_z = np.tan(np.deg2rad(SLOPE_DEG)) * max(0.0, base_pos[1] - slope_start_y)
+    ground_z = _ground_height(base_pos[1], slope_start_y)
     return upright < 0.3 or (base_pos[2] - ground_z) < 0.25
 
 
 # ── Trigger monitor ──────────────────────────────────────────────────────────
 
 class TriggerMonitor:
-    """MARX rollout-error monitor (demo-speedbump). Feed every step; fires once
-    when the EMA of the H_PRED-step prediction error exceeds
-    baseline_mean + k_sigma * baseline_std (baseline from BASELINE_T)."""
+    """MARX rollout-error monitor (demo-speedbump). Feed every step; fires when
+    the EMA of the H_PRED-step prediction error exceeds
+    baseline_mean + k_sigma * baseline_std (baseline from BASELINE_T).
+
+    Re-arming (for repeated transitions): the trigger fires on the RISING edge
+    of the error above the threshold, then disarms until the error falls back
+    below baseline_mean + REARM_FRAC * k_sigma * baseline_std (hysteresis), so
+    it re-fires once per transition rather than continuously. ``fired`` /
+    ``fire_step`` record the FIRST event (starts adaptation, unchanged for
+    single-transition terrains); ``fire_steps`` records every event."""
+
+    REARM_FRAC = 0.5
 
     def __init__(self, n_steps, k_sigma):
         from methods.marxefe_optimizer import build_marx_agent
@@ -164,6 +268,8 @@ class TriggerMonitor:
         self.ema = 0.0
         self.fired = False
         self.fire_step = None
+        self.fire_steps = []
+        self.armed = True
 
     def step(self, k, t, y_new, applied):
         self.agent.update(y_new, applied)
@@ -178,13 +284,19 @@ class TriggerMonitor:
         self.ema = e if k == 0 else (1 - EMA_ALPHA) * self.ema + EMA_ALPHA * e
         self.ema_log[k] = self.ema
 
-        if not self.fired and t >= ARM_TIME:
+        if t >= ARM_TIME:
             b0, b1 = int(BASELINE_T[0] / DT), int(BASELINE_T[1] / DT)
             mu = self.ema_log[b0:b1].mean()
             sd = self.ema_log[b0:b1].std()
-            if self.ema > mu + self.k_sigma * sd:
-                self.fired = True
-                self.fire_step = k
+            thr = mu + self.k_sigma * sd
+            if self.armed and self.ema > thr:
+                self.fire_steps.append(k)
+                self.armed = False
+                if not self.fired:
+                    self.fired = True
+                    self.fire_step = k
+            elif not self.armed and self.ema < mu + self.REARM_FRAC * self.k_sigma * sd:
+                self.armed = True
         return self.fired
 
     def zscore_trace(self):
@@ -297,19 +409,36 @@ class MarxEFE(NoAdapt):
     at the trigger and every window boundary the 8 CPG parameters are
     re-selected by minimizing expected free energy. The control prior is
     centred on the incumbent parameters (prior preference for the current
-    gait) rather than mid-bounds."""
+    gait) rather than mid-bounds.
+
+    Three class attributes parameterize the ablations (M5/C5 of the RA-L
+    review); the subclasses below flip exactly one each:
+      FORGETTING   — exponential forgetting factor (0.995 tracks the change;
+                     1.0 = no forgetting).
+      EPISTEMIC    — include the information-seeking EFE terms (True = full
+                     active inference; False = greedy-MAP predictive selector).
+      PRIOR_CENTER — control-prior mean: "incumbent" (prefer the current gait)
+                     or "mid" (mid-bounds, no preference for staying put)."""
     name = "marxefe"
     safeguarded = True
+    FORGETTING = 0.995
+    EPISTEMIC = True
+    PRIOR_CENTER = "incumbent"
 
     def __init__(self, incumbent, oracle_params, box, seed):
         from methods.marxefe_optimizer import build_marx_agent
+        from methods.cpg_bounds import bounds_lower, bounds_upper
         np.random.seed(1)
         self.agent = build_marx_agent(
             target_velocity=TARGET_VX, control_prior_scale=0.15,
             goal_prior_std=(np.sqrt(0.5), np.sqrt(0.5),
                             np.deg2rad(45), np.deg2rad(45)),
-            time_horizon=2, forgetting=0.995)
-        self.agent.μ = np.asarray(incumbent, float).copy()
+            time_horizon=2, forgetting=self.FORGETTING)
+        if self.PRIOR_CENTER == "mid":
+            # build_marx_agent already centres μ at mid-bounds; keep it.
+            self.agent.μ = 0.5 * (bounds_lower.numpy() + bounds_upper.numpy())
+        else:
+            self.agent.μ = np.asarray(incumbent, float).copy()
         lo, hi = box
         self.lims = [(float(lo[i]), float(hi[i]))
                      for _ in range(self.agent.thorizon) for i in range(8)]
@@ -323,15 +452,52 @@ class MarxEFE(NoAdapt):
         try:
             u = self.agent.minimizeEFE(control_lims=self.lims,
                                        lambda_energy=EFE_LAMBDA,
-                                       max_iter=100, tol=1e-3)
+                                       max_iter=100, tol=1e-3,
+                                       epistemic=self.EPISTEMIC)
             return np.clip(np.asarray(u[:8], float), self.lo, self.hi)
         except Exception as e:
-            print(f"[marxefe] EFE failed ({e}); holding parameters")
+            print(f"[{self.name}] EFE failed ({e}); holding parameters")
             return None
 
 
+class MarxEFEGreedy(MarxEFE):
+    """Ablation (M5): drop the information-seeking EFE terms -> greedy-MAP
+    predictive selector. Isolates what the active-inference machinery adds."""
+    name = "marxefe_greedy"
+    EPISTEMIC = False
+
+
+class MarxEFENoForget(MarxEFE):
+    """Ablation (M5): no forgetting (λ = 1). Tests whether tracking the
+    non-stationary flat->slope change needs the forgetting factor."""
+    name = "marxefe_noforget"
+    FORGETTING = 1.0
+
+
+class MarxEFEMidPrior(MarxEFE):
+    """Ablation (M3/C5): control prior centred at mid-bounds instead of the
+    incumbent. Tests whether MARX-EFE's caution comes from a prior preference
+    for staying near the current gait."""
+    name = "marxefe_midprior"
+    PRIOR_CENTER = "mid"
+
+
+class MarxEFENoSafeguard(MarxEFE):
+    """Ablation (C5, the decisive adaptation test): MARX-EFE with the shared
+    revert-to-best safeguard DISABLED. The safeguard restores the incumbent
+    whenever a candidate underscores, which forces every arm back to the flat
+    optimum by construction — so no method can demonstrate adaptation while it
+    is active. With it off, MARX-EFE selects freely from its model every window;
+    if its θ(t) then moves toward θ*(10°) while staying upright, it genuinely
+    adapts (unlike grid/BO, which need destabilizing physical trials)."""
+    name = "marxefe_nosafeguard"
+    safeguarded = False
+
+
 METHODS = {c.name: c for c in (NoAdapt, Oracle, GridSearchOnline,
-                               BOOnline, MarxEFE)}
+                               BOOnline, MarxEFE, MarxEFEGreedy,
+                               MarxEFENoForget, MarxEFEMidPrior,
+                               MarxEFENoSafeguard)}
 
 
 class Safeguard:
@@ -422,8 +588,12 @@ def run_trial(seed, slope_start_y, method_name, k_sigma,
     trigger_step = None
     guard = None                # built at the trigger (needs pre-trigger J)
     window_scores = []          # window J values after trigger
+    selected_params = []        # the 8-vector applied in each post-trigger
+                                # window (aligned with window_scores): what the
+                                # method actually selected -> the θ(t) trajectory
     win_buf = {"vx": [], "roll": [], "pitch": []}
     fell, fall_step = False, None
+    cur_y = 0.0                 # robot forward position (for friction terrain)
 
     for k in range(n_steps):
         t = k * DT
@@ -441,6 +611,7 @@ def run_trial(seed, slope_start_y, method_name, k_sigma,
                 seg_start = applied.copy()
                 seg_target = np.asarray(target, float)
                 seg_anchor = k
+            selected_params.append(np.asarray(seg_target, float).copy())
 
         frac = min(1.0, (k - seg_anchor) / max(1, RAMP))
         applied = seg_start + frac * (seg_target - seg_start)
@@ -455,11 +626,15 @@ def run_trial(seed, slope_start_y, method_name, k_sigma,
                                     targetPosition=0.0, force=500)
             p.setJointMotorControl2(robot, h_id, p.POSITION_CONTROL, hips[j])
             p.setJointMotorControl2(robot, k_id, p.POSITION_CONTROL, knees[j])
+        # Friction terrain: set the ground grip for the robot's current position
+        # (no-op on slope terrain). Uses last step's position (1-step lag).
+        terrain.apply_dynamic_friction(p, robot, cur_y)
         p.stepSimulation()
 
         base_pos, base_ori = get_base_orientation(p, robot, DEFAULT_ORI)
         vel, _ = p.getBaseVelocity(robot)
         roll, pitch, _ = p.getEulerFromQuaternion(base_ori)
+        cur_y = base_pos[1]
         log["y"][k], log["z"][k] = base_pos[1], base_pos[2]
         log["vx"][k] = vel[1]
         log["roll"][k], log["pitch"][k] = roll, pitch
@@ -481,6 +656,7 @@ def run_trial(seed, slope_start_y, method_name, k_sigma,
                 seg_start = applied.copy()
                 seg_target = np.asarray(target, float)
                 seg_anchor = k + 1
+            selected_params.append(np.asarray(seg_target, float).copy())
             win_buf = {"vx": [], "roll": [], "pitch": []}
         elif trigger_step is not None:
             win_buf["vx"].append(vel[1])
@@ -502,10 +678,14 @@ def run_trial(seed, slope_start_y, method_name, k_sigma,
             break
 
     p.disconnect()
+    n = len(log["y"])
     return dict(log=log, fell=fell, fall_step=fall_step,
                 trigger_step=trigger_step, window_scores=window_scores,
-                ema=monitor.ema_log[:len(log["y"])],
-                z=monitor.zscore_trace()[:len(log["y"])])
+                fire_steps=[s for s in monitor.fire_steps if s < n],
+                selected_params=[np.asarray(x, float).tolist()
+                                 for x in selected_params],
+                ema=monitor.ema_log[:n],
+                z=monitor.zscore_trace()[:n])
 
 
 def trial_metrics(res, slope_start_y):
@@ -543,6 +723,7 @@ def trial_metrics(res, slope_start_y):
         dist=float(log["y"][min(k1, n) - 1] - log["y"][kT]),
         max_roll=float(np.rad2deg(np.max(np.abs(roll)))) if len(roll) else np.nan,
         mean_vx=float(np.mean(vx)) if len(vx) else np.nan,
+        n_triggers=len(res.get("fire_steps", [])),
     )
 
 
@@ -560,7 +741,10 @@ def find_y10(seed, incumbent):
 # ── Stage 1: trigger calibration ─────────────────────────────────────────────
 
 def _calib_job(job):
-    seed, incumbent = job
+    seed, incumbent, slope_deg, terrain_kind = job
+    global SLOPE_DEG, TERRAIN_KIND
+    SLOPE_DEG = float(slope_deg)
+    TERRAIN_KIND = terrain_kind
     inc = np.asarray(incumbent, float)
     box = (inc, inc)
     y10 = find_y10(seed, inc)
@@ -583,7 +767,8 @@ def calibrate(n_seeds, workers):
     incumbent, _ = load_selected()
     ctx = get_context("spawn")
     with ctx.Pool(workers, maxtasksperchild=2) as pool:
-        out = pool.map(_calib_job, [(s, incumbent) for s in range(n_seeds)])
+        out = pool.map(_calib_job, [(s, incumbent, SLOPE_DEG, TERRAIN_KIND)
+                                    for s in range(n_seeds)])
     out = [o for o in out if o is not None]
     arm_k = int(ARM_TIME / DT)
     kT = int(PRE_T / DT)
@@ -627,7 +812,13 @@ def calibrate(n_seeds, workers):
 # ── Stage 2: main experiment ─────────────────────────────────────────────────
 
 def _seed_job(job):
-    seed, incumbent, oracle_params, k_sigma, trust_radius, arms = job
+    (seed, incumbent, oracle_params, k_sigma, trust_radius, arms,
+     slope_deg, terrain_kind) = job
+    # Spawned workers re-import the module with defaults; set the terrain this
+    # run uses (terrain_cfg / fallen_on_terrain read these module globals).
+    global SLOPE_DEG, TERRAIN_KIND
+    SLOPE_DEG = float(slope_deg)
+    TERRAIN_KIND = terrain_kind
     inc = np.asarray(incumbent, float)
     orc = np.asarray(oracle_params, float)
 
@@ -644,7 +835,8 @@ def _seed_job(job):
     if y10 is None:
         return dict(seed=seed, valid=0, reason="fell_calibration")
 
-    row = dict(seed=seed, valid=1, reason="", y10=y10)
+    row = dict(seed=seed, valid=1, reason="", y10=y10,
+               trust_radius=float(trust_radius))
     trig_steps = []
     for arm in arms:
         res = run_trial(seed, y10, arm, k_sigma, inc, orc, box,
@@ -660,6 +852,8 @@ def _seed_job(job):
             row[f"{arm}_{k}"] = v
         row[f"{arm}_windows"] = json.dumps(
             [round(float(x), 3) for x in res["window_scores"]])
+        row[f"{arm}_params"] = json.dumps(
+            [[round(float(v), 4) for v in p] for p in res["selected_params"]])
     row["trigger_spread"] = int(max(trig_steps) - min(trig_steps))
     return row
 
@@ -672,8 +866,8 @@ def run_main(seeds, workers, trust_radius, arms):
     print(f"oracle (sloped-opt) : {np.round(oracle_params, 3).tolist()}")
     print(f"trigger K = {k_sigma}, trust_radius = {trust_radius}, arms = {arms}")
 
-    jobs = [(s, incumbent, oracle_params, k_sigma, trust_radius, arms)
-            for s in range(seeds)]
+    jobs = [(s, incumbent, oracle_params, k_sigma, trust_radius, arms,
+             SLOPE_DEG, TERRAIN_KIND) for s in range(seeds)]
     ctx = get_context("spawn")
     rows = []
     with ctx.Pool(workers, maxtasksperchild=2) as pool:
@@ -828,9 +1022,140 @@ def aggregate():
     fig.suptitle("Event-triggered CPG adaptation on flat→10° slope "
                  f"({n} seeds, adaptation window {ADAPT_T:.0f} s)", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    out = os.path.join(RESULTS_DIR, "eventtrigger_comparison.png")
+    out = os.path.join(RESULTS_DIR, f"eventtrigger_comparison{FIG_TAG}.png")
     fig.savefig(out, dpi=150)
     print(f"\nsaved {out}")
+
+    # θ(t) trajectory analysis (M3): does each method actually move toward the
+    # incline optimum, or does it stay near the incumbent?
+    if any(f"{a}_params" in df.columns for a in arms):
+        plot_theta_trajectory(df, arms, plt)
+
+
+PARAM_NAMES = ["coupling γ", "ω_swing", "ω_stance", "F_fast", "K_stop",
+               "A_hip", "A_knee", "b"]
+
+
+def plot_theta_trajectory(df, arms, plt):
+    """θ(t) evidence for M3. For every method that selects parameters, parse the
+    per-window selected θ, normalize to the CPG bounds, and quantify how far it
+    moves from the flat incumbent θ*(flat) toward the incline optimum θ*(10°):
+
+        gap_closed(window) = 1 − ‖θ_sel − θ*(10°)‖ / ‖θ*(flat) − θ*(10°)‖
+
+    (0 = stayed at the incumbent, 1 = reached the incline optimum), all in the
+    bound-normalized space. Produces (a) a gap-closed-vs-window curve per method
+    and (b) an 8-panel per-parameter median trajectory with the two reference
+    optima. Prints the final-window median gap closed per method."""
+    import warnings
+    import numpy as np
+    from methods.cpg_bounds import bounds_lower, bounds_upper
+
+    lb, ub = bounds_lower.numpy(), bounds_upper.numpy()
+    span = np.where((ub - lb) > 0, ub - lb, 1.0)
+    incumbent, oracle = load_selected()
+    inc_n = (incumbent - lb) / span
+    orc_n = (oracle - lb) / span
+    gap = float(np.linalg.norm(inc_n - orc_n))
+    if gap < 1e-9:
+        print("\nθ(t): incumbent and oracle coincide; skipping gap-closed metric")
+        return
+
+    # The methods search a trust region of ±trust_radius of each parameter's
+    # range around the incumbent, so θ*(10°) is generally NOT reachable. Report
+    # the gap closed toward BOTH the true optimum and the best target achievable
+    # inside the trust region (the true optimum clipped to the box) — otherwise a
+    # perfect adapter looks like it "failed" only because the box caps its reach.
+    tr = float(df["trust_radius"].iloc[0]) if "trust_radius" in df.columns else 0.0
+    if tr > 0:
+        orc_clip_n = np.clip(orc_n, inc_n - tr, inc_n + tr)
+    else:
+        orc_clip_n = orc_n
+    gap_clip = max(float(np.linalg.norm(inc_n - orc_clip_n)), 1e-9)
+
+    colors = {"grid": "#2a9d64", "bo": "#2a78d6", "marxefe": "#eb6834",
+              "marxefe_greedy": "#f0a35e", "marxefe_noforget": "#9b59b6",
+              "marxefe_midprior": "#16a085", "oracle": "#0b0b0b",
+              "noadapt": "#8a8984"}
+    selectors = [a for a in arms
+                 if a not in ("noadapt", "oracle") and f"{a}_params" in df.columns]
+    n_show = int(ADAPT_T / (WINDOW * DT))
+
+    def arm_traj(a):
+        """(n_seeds, n_show, 8) bound-normalized selected θ; NaN where missing."""
+        T = np.full((len(df), n_show, 8), np.nan)
+        for r, (_, row) in enumerate(df.iterrows()):
+            try:
+                ps = json.loads(row[f"{a}_params"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            for i, p in enumerate(ps[:n_show]):
+                T[r, i, :] = (np.asarray(p, float) - lb) / span
+        return T
+
+    print("\nθ(t) gap closed toward θ*(10°) [and toward the trust-region-clipped "
+          "optimum] (1 = reached, 0 = stayed at incumbent):")
+    fig1, ax = plt.subplots(figsize=(7.5, 5))
+    x = np.arange(n_show)
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for a in selectors:
+            T = arm_traj(a)
+            d = np.linalg.norm(T - orc_n[None, None, :], axis=2)  # (seeds, windows)
+            closed = 1.0 - d / gap
+            d_clip = np.linalg.norm(T - orc_clip_n[None, None, :], axis=2)
+            closed_clip = 1.0 - d_clip / gap_clip
+            med = np.nanmedian(closed, axis=0)
+            q1 = np.nanpercentile(closed, 25, axis=0)
+            q3 = np.nanpercentile(closed, 75, axis=0)
+            ax.plot(x, med, color=colors.get(a, "k"), lw=2, label=a)
+            ax.fill_between(x, q1, q3, color=colors.get(a, "k"), alpha=0.12)
+            fin = med[np.isfinite(med)]
+            mc = np.nanmedian(closed_clip, axis=0)
+            finc = mc[np.isfinite(mc)]
+            print(f"  {a:18s}: gap closed = "
+                  f"{(fin[-1] if len(fin) else float('nan')):5.2f}   "
+                  f"[clipped: {(finc[-1] if len(finc) else float('nan')):5.2f}]")
+    ax.axhline(0.0, color="#8a8984", lw=1, ls="--")
+    ax.axhline(1.0, color="#0b0b0b", lw=1, ls=":")
+    ax.text(n_show - 0.5, 1.01, "θ*(10°)", ha="right", fontsize=8)
+    ax.text(n_show - 0.5, 0.02, "θ*(flat) incumbent", ha="right", fontsize=8)
+    ax.set_xlabel("window since trigger (1.5 s each)")
+    ax.set_ylabel("fraction of incumbent→optimum gap closed")
+    ax.set_title("Do the methods adapt θ toward the incline optimum? "
+                 "(median, IQR band)")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    fig1.tight_layout()
+    out1 = os.path.join(RESULTS_DIR, f"theta_gap_closed{FIG_TAG}.png")
+    fig1.savefig(out1, dpi=150)
+    print(f"saved {out1}")
+
+    # Per-parameter median trajectories (bound-normalized).
+    trajs = {a: arm_traj(a) for a in selectors}
+    fig2, axes = plt.subplots(2, 4, figsize=(15, 7))
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for j, axp in enumerate(axes.flat):
+            for a in selectors:
+                med = np.nanmedian(trajs[a][:, :, j], axis=0)
+                axp.plot(x, med, color=colors.get(a, "k"), lw=1.6, label=a)
+            axp.axhline(inc_n[j], color="#8a8984", lw=1, ls="--")
+            axp.axhline(orc_n[j], color="#0b0b0b", lw=1, ls=":")
+            if tr > 0:
+                axp.axhline(orc_clip_n[j], color="#c0392b", lw=1, ls="-.")
+            axp.set_title(PARAM_NAMES[j], fontsize=9)
+            axp.set_ylim(-0.05, 1.05)
+            axp.grid(alpha=0.3)
+            if j == 0:
+                axp.legend(fontsize=7)
+    fig2.suptitle("Selected CPG parameters after the trigger (bound-normalized; "
+                  "dashed = θ*(flat), dotted = θ*(10°), dash-dot = trust-region "
+                  "limit toward θ*(10°))", fontsize=12)
+    fig2.tight_layout(rect=[0, 0, 1, 0.96])
+    out2 = os.path.join(RESULTS_DIR, f"theta_per_parameter{FIG_TAG}.png")
+    fig2.savefig(out2, dpi=150)
+    print(f"saved {out2}")
 
 
 def main():
@@ -843,7 +1168,19 @@ def main():
                     help="0 = full CPG bounds (repo default); >0 = box of "
                          "this fraction of the bounds around the incumbent")
     ap.add_argument("--arms", type=str, default=",".join(ARMS))
+    ap.add_argument("--terrain", type=str, default="sloped10",
+                    choices=list(TERRAINS),
+                    help="terrain / reference-optima set (M6 generalization)")
+    ap.add_argument("--tag", type=str, default=None,
+                    help="output namespace for CSV+figures (default: terrain "
+                         "name when not sloped10, else none)")
     args = ap.parse_args()
+
+    set_terrain(args.terrain)
+    tag = args.tag if args.tag is not None else (
+        "" if args.terrain == "sloped10" else args.terrain)
+    set_output_tag(tag)
+
     if args.stage == "calibrate":
         calibrate(args.cal_seeds, args.workers)
     elif args.stage == "run":

@@ -67,7 +67,9 @@ def build_ground(p):
         # Piecewise terrain: list of (y_start, slope_deg) segments. Slope is 0
         # before the first y_start and equal to the last preceding segment after.
         segs = TERRAIN_CONFIG["segments"]
-        _ground_id = _build_heightfield(p, _piecewise_height_fn(segs))
+        _ground_id = _build_heightfield(
+            p, _piecewise_height_fn(segs),
+            n_cols=int(TERRAIN_CONFIG.get("n_cols", 512)))
         return _ground_id
     if kind == "natural":
         # Natural landscape: forward bands of grass/gravel/rocks/river, each with
