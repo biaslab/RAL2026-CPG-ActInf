@@ -599,9 +599,11 @@ def run_cpg_trial(params: np.ndarray,
         _, base_orientation = p.multiplyTransforms(
             [0, 0, 0], base_quat, [0, 0, 0], DEFAULT_ORI
         )
+        # Physical convention (robot walks +Y): euler[0] is the forward
+        # nose-pitch, euler[1] the lateral bank-roll.
         euler = p.getEulerFromQuaternion(base_orientation)
-        roll_log[step] = euler[0]
-        pitch_log[step] = euler[1]
+        pitch_log[step] = euler[0]
+        roll_log[step] = euler[1]
         yaw_log[step] = euler[2]
 
         for j in range(n_legs):

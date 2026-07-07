@@ -598,7 +598,10 @@ def extract_observation(p, robot, ori_default):
     base_vel, _ = p.getBaseVelocity(robot)
     vx = base_vel[1]   # forward +Y
     vy = base_vel[0]   # lateral  X
-    roll, pitch, yaw = p.getEulerFromQuaternion(base_orientation)
+    # Physical convention: with the robot walking in +Y, getEulerFromQuaternion
+    # returns (forward nose-pitch, lateral bank-roll, yaw), so unpack as
+    # pitch, roll, yaw (euler[0] is the physical pitch, euler[1] the physical roll).
+    pitch, roll, yaw = p.getEulerFromQuaternion(base_orientation)
     y_k = np.array([vx, vy, pitch, roll])
     return y_k, base_pos, base_orientation
 
@@ -930,7 +933,8 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
         vx_log[k_step] = base_vel[1]   # forward +Y
         vy_log[k_step] = base_vel[0]   # lateral  X
 
-        roll, pitch, yaw = p.getEulerFromQuaternion(base_orientation)
+        # Physical convention (+Y forward): euler[0]=pitch, euler[1]=roll.
+        pitch, roll, yaw = p.getEulerFromQuaternion(base_orientation)
         roll_angles[k_step]  = roll
         pitch_angles[k_step] = pitch
         yaw_angles[k_step]   = yaw

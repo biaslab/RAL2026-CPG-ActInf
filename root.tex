@@ -53,7 +53,8 @@
 
 \title{\LARGE \bf
 % Online Bayesian optimization of central pattern generator parameters in quadrupedal robot locomotion
-Rapid terrain adaptation through continual learning of central pattern generator parameters for quadrupedal robot locomotion
+%Rapid terrain adaptation through continual learning of central pattern generator parameters for quadrupedal robot locomotion
+Event-triggered adaptation of central pattern generator parameters\\ in quadrupedal robot locomotion
 }
 
 
@@ -77,12 +78,12 @@ Rapid terrain adaptation through continual learning of central pattern generator
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{abstract}
 Central pattern generators (CPGs) produce efficient rhythmic locomotion from a small set of parameters, but a parameter set tuned for one terrain is no longer optimal once the terrain changes.
-We show that the CPG parameters yielding stable walking on flat ground and on a $10^{\circ}$ incline are distinct, and that keeping the flat-optimal parameters after the transition roughly doubles the probability of a fall.
+We show that the CPG parameters yielding stable walking on flat ground and on a $10^{\circ}$ incline are distinct, and that on a corridor of repeated transitions keeping the flat-optimal set more than doubles the fall rate relative to the terrain-matched optimum, a gap that persists over the traverse.
 Resuming stable locomotion therefore requires online adaptation.
-We propose an event-triggered scheme in which a prediction-error monitor detects the terrain change and initiates re-tuning of the CPG parameters within the same walking bout.
-Using this scheme, we compare three parameter-selection strategies, grid search, Bayesian optimization, and an autoregressive active inference agent that minimizes expected free energy.
-On a flat-to-incline transition over $100$ trials, the active inference agent matches an oracle that switches directly to the incline optimum and keeps falls at the level of the best fixed gait, whereas grid search and Bayesian optimization roughly double the fall rate by destabilizing the robot while probing candidate gaits.
-Selecting parameters from a learned model, rather than by physical trial, is what allows adaptation without sacrificing stability.
+We propose an event-triggered scheme in which a prediction-error monitor detects each terrain change and re-tunes the CPG within the same walking bout, and we compare grid search, Bayesian optimization, and an autoregressive active inference agent that minimizes expected free energy.
+Grid search and Bayesian optimization destabilize the robot while probing candidate gaits, roughly doubling the fall rate, whereas the active inference agent selects parameters from a learned model without such trials and avoids this harm.
+Aligning its goal prior with the stability criterion, rather than with velocity tracking, makes it significantly outperform keeping the incumbent gait on a sustained transition, and the information-seeking term of the free energy is essential to this gain; generalizing the improvement across repeated transitions remains open.
+Selecting parameters from a model avoids the destabilization of trial-based search, and encoding stability in the agent's goal is what turns caution into improvement.
 \end{abstract}
 
 
@@ -113,10 +114,11 @@ Run \emph{online}, the procedure scores the parameters used over the most recent
 Because unconstrained proposals can jump to destabilizing gaits, the search is confined to a trust region around the current best parameters \cite{eriksson2019turbo}.
 We adopt this online Bayesian optimization as one of the adaptation baselines in Section~\ref{sec:experiments}.
 
-In the following, we contribute to the field with
+In the following, we contribute
 \begin{itemize}
-    \item the design of an intelligent agent that continuously updates parameters of a central pattern generator, and
-    \item by benchmarking this agent against offline grid search and online Bayesian optimization.
+    \item evidence that terrain-matched CPG parameters confer a durable survival advantage across repeated terrain transitions, so that resuming stable locomotion calls for online adaptation;
+    \item an event-triggered adaptation scheme, driven by a re-arming prediction-error monitor, together with the finding that online black-box gait optimization (grid search and Bayesian optimization) is actively destructive on hazardous transitions; and
+    \item an autoregressive active inference agent that avoids this destabilization by selecting from a learned model, and the result that aligning its goal prior with the stability criterion is what turns this caution into a significant improvement over the incumbent gait on a sustained transition, with robust adaptation across recurring transitions identified as an open problem.
 \end{itemize}
 
 
@@ -135,12 +137,26 @@ Each oscillator evolves as:
 \begin{align}
   \dot{x}_i &= \alpha\,(u - r_i^2)\,x_i - \omega_i\,y_i, \\
   \dot{y}_i &= \beta\,(u - r_i^2)\,y_i + \omega_i\,x_i
-               + \gamma \sum_{j=1}^4 k_{ij}\,y_j, \\
+               + \gamma \sum_{j=1}^4 k_{ij}\,y_j + s_i, \label{eq:ydot}\\
   \omega_i &= \frac{\omega_{\mathrm{stance}}}{1 + e^{-b\,y_i}}
             + \frac{\omega_{\mathrm{swing}}}{1 + e^{\,b\,y_i}},
     \label{Equation 3}
 \end{align}
-where $r_i = \sqrt{x_i^2 + y_i^2}$, $u$ sets the squared limit-cycle amplitude, $\alpha, \beta > 0$ are convergence rates, $\gamma$ is the coupling gain, and $b$ controls the sharpness of the frequency transition between stance and swing phases.
+where $r_i = \sqrt{x_i^2 + y_i^2}$, $u = 2$ is the fixed squared limit-cycle amplitude (a constant, not tuned), $\alpha, \beta > 0$ are convergence rates, $\gamma$ is the coupling gain, and $b$ controls the sharpness of the frequency transition between stance and swing phases.
+
+The final term $s_i$ in Eq.~\ref{eq:ydot} is the contact-driven sensory feedback, and it is where the fast-contact gain $F_{\text{fast}}$ and the stop gain $K_{\text{stop}}$ enter the dynamics.
+It couples each oscillator to its leg's stance or swing phase, read from $y_i$ by hysteresis, and to the binary foot-contact signal $c_i \in \{0, 1\}$:
+\begin{align}
+    s_i = \begin{cases}
+        K_{\text{stop}}\Big(\omega_i x_i - \gamma \sum_{j} k_{ij} y_j\Big),
+            & \text{stop},\\[2pt]
+        F_{\text{fast}}\,\operatorname{sgn}(y_i), & \text{fast},\\[2pt]
+        0, & \text{otherwise}.
+    \end{cases}
+    \label{eq:feedback}
+\end{align}
+The \emph{stop} case applies when phase and contact disagree, that is a swing phase with no contact ($c_i = 0$) or a stance phase with contact ($c_i = 1$), and $K_{\text{stop}}$ scales a correction that arrests the oscillator; the \emph{fast} case applies otherwise during swing or stance, where $F_{\text{fast}}$ advances it in the direction of $y_i$; the feedback is zero during the transition between phases.
+This is a Righetti-style load feedback that keeps the rhythm entrained to ground contact \cite{righetti2008pattern}.
 
 The CPG outputs $(x_i, y_i)$ are mapped to hip and knee joint angles:
 \begin{align}
@@ -154,7 +170,7 @@ The behavior of the CPG is governed by a small set of parameters, collected in t
     \theta = [\gamma, \omega_{\text{swing}}, \omega_{\text{stance}}, F_{\text{fast}}, K_{\text{stop}}, A_{\text{hip}}, A_{\text{knee}}, b] \,,
     \label{eq:cpg-parameters}
 \end{align}
-comprising the coupling gain, the phase-dependent stance and swing frequencies, a fast-contact gain and stop gain from the sensory feedback, the hip and knee amplitudes, and the sigmoid sharpness $b$ of Eq.~\ref{Equation 3}.
+comprising the coupling gain, the phase-dependent stance and swing frequencies, the fast-contact gain $F_{\text{fast}}$ and stop gain $K_{\text{stop}}$ of the sensory feedback (Eq.~\ref{eq:feedback}), the hip and knee amplitudes, and the sigmoid sharpness $b$ of Eq.~\ref{Equation 3}.
 These parameters set the gait shape, and are held fixed during locomotion.
 
 \subsection{Terrain-dependent parameters}
@@ -181,15 +197,19 @@ The difficulty is that $\theta^{\star}(e)$ is not constant across terrains.
 A gait that keeps the trunk level on flat ground pitches the body, shifts foot-contact timing, and alters the coupling needed for coordination once the same legs meet an incline, so the location of the optimum moves.
 We consider the two terrains of Fig.~\ref{fig:terrain-optima}: flat ground and a $10^{\circ}$ incline.
 Optimizing Eq.~\ref{eq:criterion} on each terrain with Bayesian optimization yields the parameter vectors shown in the lower panel, and they are visibly different.
-The incline optimum uses markedly stronger inter-limb coupling, with the coupling gain $\gamma$ raised to the top of its range against the bottom of its range on flat ground, together with a much softer stance-to-swing frequency transition, expressed by a small sharpness $b$; the stance and swing frequencies and the contact-feedback gains stay comparable.
-Each set is more stable on the terrain it was tuned for, and retaining the flat-optimal parameters after the ground turns into an incline roughly doubles the probability of a fall relative to adopting the incline-optimal parameters (Section~\ref{sec:experiments}).
+The incline optimum uses markedly stronger inter-limb coupling, with the coupling gain $\gamma$ raised from the bottom to the top of its range, together with a much softer stance-to-swing frequency transition, expressed by a small sharpness $b$; the swing frequency $\omega_{\rm sw}$ and stop gain $K_{\rm stop}$ shift only slightly, and the remaining four parameters are identical across the two terrains.
+Each set is more stable on the terrain it was tuned for.
+The cost of the mismatch grows with exposure to the new terrain.
+On a single, isolated transition onto the incline it is transient: retaining the flat optimum roughly doubles the early fall rate, but survivors eventually settle and the advantage of the incline optimum washes out over the bout (Section~\ref{sec:experiments}).
+On a corridor of repeated $10^{\circ}$ transitions, however, the cost is sustained: keeping the flat optimum leads to a fall in $26\%$ of runs, against $11\%$ when the parameters are switched to the incline optimum, and this gap holds over the whole traverse rather than fading (Section~\ref{sec:experiments}).
+Terrain-matched parameters therefore confer a durable survival advantage whenever the robot must cross terrain changes repeatedly, which is the setting a legged machine actually operates in.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.49\linewidth]{terrain_flat}\hfill
 \includegraphics[width=0.49\linewidth]{terrain_sloped}\\[2pt]
 \includegraphics[width=\linewidth]{optimal_params}
-\caption{The optimal CPG parameters depend on the terrain. \emph{Top}: the Laikago walking on flat ground and on a $10^{\circ}$ incline. \emph{Bottom}: the parameter vectors that maximize the stability criterion (Eq.~\ref{eq:criterion}) on each terrain, normalized to the shared bounds. The optima differ, most visibly in the coupling gain $\gamma$ and the frequency-transition sharpness $b$.}
+\caption{The optimal CPG parameters depend on the terrain. \emph{Top}: the Laikago walking on flat ground and on a $10^{\circ}$ incline. \emph{Bottom}: the parameters that differ between the two terrain-conditioned optima of Eq.~\ref{eq:criterion}, normalized to the shared bounds; the remaining four ($\omega_{\rm st}$, $F_{\rm fast}$, $A_{\rm hip}$, $A_{\rm knee}$) are identical across the two terrains and are omitted. The shift is largest in the coupling gain $\gamma$ and the frequency-transition sharpness $b$.}
 \label{fig:terrain-optima}
 \end{figure}
 
@@ -305,21 +325,22 @@ On flat ground this rollout error is small; when the robot meets the incline the
 We compare an exponential moving average of the error against a baseline collected during flat walking, and fire the trigger when it exceeds $\text{baseline mean} + K \cdot \text{baseline s.d.}$
 One-step innovations at $100$\,Hz are dominated by persistence and barely register the terrain change, whereas the $0.5$\,s rollout compounds the model mismatch into a clear spike.
 Calibrating on held-out seeds, $K = 16$ is the smallest threshold with no false positives on flat-only runs and no missed detections on flat-to-incline runs; it fires on average $0.33$\,s after the trunk crosses onto the incline.
+For the repeated-transition corridor of Section~\ref{sec:exp-repeated} the monitor re-arms on the rising edge of the error, so it fires once per ramp rather than latching; a threshold of $K = 10$ then detects every ramp with no false positives on the flat landings between them.
 
 \subsection{Adaptation protocol}
 \label{sec:exp-protocol}
 
 When the trigger fires, the selected method begins proposing CPG parameters, one candidate per $1.5$\,s window, ramped in over $0.3$\,s, and each window is scored by Eq.~\ref{eq:criterion}.
-All three optimizers search a trust region of $\pm 0.25$ of the parameter range around the incumbent and share a common safety layer: the best-scoring parameters seen so far are restored for one window whenever a candidate scores well below them.
-Without both the trust region and this safeguard, every method, MARX-EFE included, destabilizes the robot within seconds, so these two elements are applied uniformly across methods.
+The optimizers search a trust region around the incumbent and share a common safety layer: the best-scoring parameters seen so far are restored for one window whenever a candidate scores well below them.
+Without the safeguard, every method, MARX-EFE included, destabilizes the robot within seconds, so it is applied uniformly across methods.
+The trust-region radius, however, interacts with $\theta^{\star}$: at $\pm 0.25$ of the parameter range the incline optimum is not reachable, because $\theta^{\star}(10^{\circ})$ raises the coupling gain $\gamma$ across its full range and drops the sharpness $b$, so only $30\%$ of the flat-to-incline shift lies inside the box.
+We therefore report both the tight $\pm 0.25$ region, which equalizes caution across the black-box optimizers, and a full-range region in which $\theta^{\star}(10^{\circ})$ is reachable, which is required to ask whether a method can adapt toward it.
 MARX-EFE uses a forgetting factor of $0.995$ so that its model tracks the change, and its control prior is centered on the current parameters.
+Its goal prior encodes the target observation; we compare the original prior, which rewards the target forward velocity with a loose attitude term, against a \emph{stability-aligned} prior whose attitude term is tightened to the $\psi_0 = 10^{\circ}$ scale of the criterion, so that the expected-free-energy objective targets the attitude that $\theta^{\star}$ optimizes.
 
-We compare five arms, all sharing an identical pre-trigger trajectory per seed so that the event fires at the same instant in every arm:
-\begin{itemize}
-    \item \emph{no adaptation}: keep $\theta^{\star}(\text{flat})$, a lower reference;
-    \item \emph{oracle}: switch directly to $\theta^{\star}(10^{\circ})$, an upper reference that presumes the new optimum is known;
-    \item \emph{grid}, \emph{BO}, and \emph{MARX-EFE}: the three online methods.
-\end{itemize}
+All arms share an identical pre-trigger trajectory per seed so that the event fires at the same instant in every arm.
+Two references bracket the online methods: \emph{no adaptation} keeps $\theta^{\star}(\text{flat})$, a lower reference, and the \emph{oracle} switches directly to $\theta^{\star}(10^{\circ})$, an upper reference that presumes the new optimum is known.
+The online methods are \emph{grid}, \emph{BO}, and the proposed \emph{MARX-EFE}, the last with either the velocity or the stability-aligned goal prior; we write \emph{MARX-EFE-S} for the stability-aligned variant.
 We report the fall rate over the $20$\,s after the trigger, the fall rate over the first $10$\,s (the transition phase, where the parameter mismatch itself is the hazard), the mean time the robot stays upright, and the mean windowed criterion $\bar{V}$.
 
 \subsection{Results}
@@ -350,44 +371,113 @@ Mean $\bar{V}$       & $-0.36$ & $-0.30$ & $-0.54$ & $-0.54$ & $\mathbf{-0.33}$ 
 \label{fig:eventtrigger}
 \end{figure*}
 
-Table~\ref{tab:eventtrigger} and Fig.~\ref{fig:eventtrigger} summarize the comparison.
-First, the shift in the optimum is real and it matters at the transition: within the first $10$\,s the oracle falls in $8\%$ of seeds against $19\%$ for no adaptation (McNemar $p = 0.03$), so switching to terrain-matched parameters roughly halves the early falls.
-This is the operational counterpart of the terrain-conditioned optimum in Section~\ref{sec:terrain-dependent}.
+\begin{table}[t]
+\centering
+\caption{Aligning the goal prior with stability on the flat-to-$10^{\circ}$ transition ($N = 100$ seeds, trust region widened so $\theta^{\star}(10^{\circ})$ is reachable). MARX-EFE uses the velocity goal prior; MARX-EFE-S tightens the attitude term to the stability scale; the last column removes the epistemic term from MARX-EFE-S. Lower is better except upright time and $\bar{V}$.}
+\label{tab:stable}
+\begin{tabular}{lccccc}
+\toprule
+ & \multicolumn{2}{c}{reference} & \multicolumn{3}{c}{MARX-EFE goal prior} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-6}
+Metric & no adapt & oracle & velocity & \textbf{stability} & stab., no epist. \\
+\midrule
+Falls, $20$\,s [\%]  & $40$    & $47$    & $44$    & $\mathbf{27}$ & $42$ \\
+Falls, $10$\,s [\%]  & $19$    & $8$     & $17$    & $\mathbf{7}$  & $17$ \\
+Upright time [s]     & $16.7$  & $17.3$  & $16.8$  & $\mathbf{18.4}$ & $17.0$ \\
+Mean $\bar{V}$       & $-0.36$ & $-0.30$ & $-0.37$ & $\mathbf{-0.29}$ & $-0.37$ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-Second, MARX-EFE matches this protection without knowing the new optimum.
-Its early fall rate of $10\%$ is statistically indistinguishable from the oracle and from no adaptation, and far below grid and BO at $37\%$ each ($p < 10^{-5}$).
-Over the full $20$\,s, MARX-EFE ($39\%$) again matches no adaptation ($40\%$) and stays well below grid ($83\%$) and BO ($90\%$); the difference against both black-box optimizers is large and significant (McNemar $p \le 4\times10^{-10}$, upright-time Wilcoxon $p \approx 10^{-12}$).
+Table~\ref{tab:eventtrigger} and Fig.~\ref{fig:eventtrigger} summarize the single-transition comparison at the $\pm 0.25$ trust region.
+The shift in the optimum matters at the transition: within the first $10$\,s the oracle falls in $8\%$ of seeds against $19\%$ for no adaptation (McNemar $p = 0.03$), so switching to terrain-matched parameters roughly halves the early falls.
 
-Third, trial-based search is destructive when run online.
-Grid and BO must spend whole windows walking on speculative candidates, and even with the trust region and the safeguard this roughly doubles the fall rate relative to not adapting at all ($p < 10^{-11}$).
-They pay a stability price during exploration that MARX-EFE avoids by selecting parameters from its model rather than by physical trial.
-The bottom-left panel of Fig.~\ref{fig:eventtrigger} shows the mechanism: the windowed criterion of grid and BO collapses toward the fall value within a few windows, whereas MARX-EFE and the oracle hold a near-constant score.
+Trial-based search is destructive when run online.
+Grid and BO must spend whole windows walking on speculative candidates, and on an incline a poor candidate does not merely score badly, it tips the robot over.
+Even confined to the trust region and protected by the safeguard, this roughly doubles the fall rate relative to not adapting ($83\%$ and $90\%$ against $40\%$; McNemar $p \le 4\times10^{-10}$, upright-time Wilcoxon $p \approx 10^{-12}$).
+MARX-EFE avoids these physical trials by selecting from its model, and stays far below the black-box optimizers (early $10\%$ against $37\%$, $p < 10^{-5}$).
+Over the full horizon, however, it matches no adaptation ($39\%$ against $40\%$, not significant): with the velocity goal prior it avoids harm but does not improve on holding the incumbent.
 
-Finally, over the full horizon the two references converge (no adaptation $40\%$ versus oracle $47\%$, not significant): sustained $10^{\circ}$ climbing carries a steady fall hazard for any fixed parameter set, and survivors still exhibit $12$--$14^{\circ}$ peak roll.
-A single correct switch therefore buys survival through the transition rather than immunity thereafter, which makes the early-window contrast the more informative endpoint.
+The parameter trajectories explain why (Fig.~\ref{fig:theta}).
+Under the velocity goal prior the selected $\theta(t)$ stays at $\theta^{\star}(\text{flat})$: MARX-EFE does not move toward the incline optimum.
+Two factors are responsible.
+The tight trust region does not contain $\theta^{\star}(10^{\circ})$, so the incline optimum is unreachable; but widening it does not help either, and the deeper cause is the goal prior, which rewarded forward velocity with only a loose ($45^{\circ}$) attitude term and so did not target the attitude stability that $\theta^{\star}$ optimizes.
+Ablations confirm that the machinery was idle under this goal: removing the epistemic term (a greedy predictive selector), removing the forgetting factor, or removing the safeguard each leaves the outcome statistically unchanged, and re-centering the control prior away from the incumbent only destabilizes the robot.
+The safeguard is thus load-bearing for grid and BO, which wander, but not for MARX-EFE, which holds the incumbent regardless.
+
+Aligning the goal prior with the stability criterion changes this.
+Table~\ref{tab:stable} reports the effect of tightening the attitude term to the $\psi_0 = 10^{\circ}$ scale (MARX-EFE-S), with the trust region widened so that $\theta^{\star}(10^{\circ})$ is reachable.
+MARX-EFE-S falls in $27\%$ of runs over $20$\,s against $40\%$ for no adaptation (McNemar $p = 0.04$) and in $7\%$ against $19\%$ over the first $10$\,s ($p = 0.008$), the first arm to improve significantly on holding the incumbent, and below the oracle as well ($p = 0.006$).
+It achieves this not by reaching $\theta^{\star}(10^{\circ})$, which stays out of range of its small adjustments, but by making minor attitude-directed corrections around the incumbent: a nearby, model-guided change suffices to keep the trunk upright.
+The epistemic term is now load-bearing: with it removed the same goal prior yields $42\%$, no better than no adaptation.
+The active-inference machinery therefore contributes, but only once its goal prior encodes the quantity being optimized.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{experiment-eventtrigger/results/theta_per_parameter_stable_wide.png}
+\caption{Selected CPG parameters after the trigger on the flat-to-$10^{\circ}$ transition, normalized to the parameter bounds (median over $100$ seeds). Dashed lines mark the flat incumbent $\theta^{\star}(\text{flat})$ and dotted lines the incline optimum $\theta^{\star}(10^{\circ})$. Neither the velocity-goal MARX-EFE nor the stability-aligned MARX-EFE-S travels to $\theta^{\star}(10^{\circ})$; MARX-EFE-S instead makes small attitude-directed corrections around the incumbent, which are sufficient to reduce falls (Table~\ref{tab:stable}).}
+\label{fig:theta}
+\end{figure}
+
+\subsection{Repeated transitions}
+\label{sec:exp-repeated}
+
+A single incline is a mild test of adaptation, because a fixed gait that survives the transition can coast through the rest of the bout.
+We therefore repeat the experiment on a corridor of two consecutive $10^{\circ}$ ramps separated by flat landings, so that the robot meets the terrain change more than once and a mismatched gait is punished repeatedly.
+Here the value of terrain-matched parameters is both larger and durable: the oracle falls in $11\%$ of runs against $26\%$ for no adaptation, and the gap holds over the whole traverse rather than washing out as it did on the single incline.
+The prediction-error monitor re-arms after each ramp and detects every transition without firing on the flat landings between them.
+Online black-box search remains destructive: grid and BO fall in $87\%$ and $92\%$ of runs at the full-range trust region ($38\%$ and $41\%$ even when confined to the tight region), far above both references.
+
+The model-based agent does not capture the oracle's advantage here, however (Table~\ref{tab:repeated}).
+With either goal prior it falls in $23$--$24\%$ of runs, statistically indistinguishable from no adaptation ($26\%$, McNemar $p = 0.83$) and well above the oracle ($11\%$, $p = 0.007$).
+The stability-aligned prior that improved on the single sustained incline does not replicate that gain when the transitions recur, and the epistemic term confers no advantage in this setting either.
+A gait corrected for one ramp is not necessarily right for the next after an intervening flat stretch, and the small corrections that sufficed on a single incline do not reach the alternating optimum.
+Capturing the oracle's durable benefit across repeated transitions, rather than only avoiding the destabilization that black-box search causes, therefore remains open.
+
+\begin{table}[t]
+\centering
+\caption{Repeated $10^{\circ}$ transitions (two ramps, $N = 100$ seeds, full-range trust region). MARX-EFE-S is the stability-aligned agent. Lower is better except upright time and $\bar{V}$.}
+\label{tab:repeated}
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{2}{c}{reference} & \multicolumn{4}{c}{online method} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-7}
+Metric & no adapt & oracle & grid & BO & MARX-EFE & \,-S \\
+\midrule
+Falls, $20$\,s [\%]  & $26$   & $\mathbf{11}$ & $87$  & $92$  & $23$  & $24$ \\
+Falls, $10$\,s [\%]  & $9$    & $10$          & $65$  & $73$  & $11$  & $8$  \\
+Upright time [s]     & $17.4$ & $18.7$        & $9.6$ & $9.0$ & $17.7$& $17.8$ \\
+Mean $\bar{V}$       & $0.22$ & $0.44$        & $-0.46$ & $-0.53$ & $0.27$ & $0.26$ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 
 \section{DISCUSSION}
 
 Our results separate two aspects of online adaptation that are easily conflated: deciding \emph{when} to change the gait and deciding \emph{what} to change it to.
-The prediction-error trigger resolves the first cheaply and reliably, firing within a third of a second of the terrain change and never on flat ground.
+The prediction-error trigger resolves the first cheaply and reliably, firing within a third of a second of each terrain change and never on flat ground, and it re-arms to detect a sequence of transitions.
 The second is where the methods diverge.
 Grid search and Bayesian optimization can only judge a candidate gait by walking on it, and on an incline a poor candidate does not merely score badly, it tips the robot over; even confined to a trust region and protected by a revert-to-best safeguard, this exploration roughly doubles the fall rate relative to not adapting at all.
-The active inference agent instead selects parameters from a model that it updates every control step, so it avoids destabilizing physical trials and matches an oracle handed the incline optimum in advance.
-The advantage is therefore not faster search in the usual sense, but the ability to improve the gait \emph{without} risking it.
+The active inference agent instead selects parameters from a model that it updates every control step, so it avoids these destabilizing trials.
+What the agent selects, however, depends critically on its goal prior.
+With a goal that tracks forward velocity, the agent simply holds the incumbent gait: it avoids harm but does not improve on not adapting, and its information-seeking term, forgetting factor, and revert-to-best safeguard are all idle.
+Once the goal prior encodes attitude stability, matching the criterion that defines the terrain optimum, the agent instead makes small model-guided corrections that significantly reduce falls on a sustained transition, and the information-seeking term becomes essential to that gain.
+The advantage is therefore not faster search, but the ability to improve the gait without risking it, and it appears only when the agent's objective encodes the quantity being optimized.
 
 Several limitations qualify these conclusions.
-We study a single, clean transition from flat ground to a $10^{\circ}$ incline in simulation, with the reference optima computed offline; broader terrains, friction changes, and hardware experiments remain to be done.
-The open-loop CPG also carries an intrinsic hazard on a sustained slope, so that even the oracle falls in nearly half of the long runs and the benefit of a correct switch is concentrated in the seconds around the transition.
-Finally, the comparison equalizes caution across methods through a shared trust region and safeguard; how far these can be relaxed for a model-based agent, which does not need physical trials to avoid harmful gaits, is an open question.
-Learning the terrain-conditioned optimum online, rather than assuming it is known, and coupling the agent to closed-loop attitude feedback are natural next steps.
+The improvement does not yet generalize: on a corridor of repeated transitions, where the terrain-matched optimum confers a large and durable advantage, neither the stability-aligned agent nor any goal-prior setting we swept captures it, and the selected parameters never travel to the terrain optimum.
+The barrier appears structural rather than a matter of tuning: the linear autoregressive model supports small local corrections but cannot predict which distant parameter settings are stable, and loosening the control prior to permit larger moves only reintroduces destabilizing exploration.
+Robust adaptation across recurring terrain changes, for instance by re-selecting per transition or by a model expressive enough to navigate to the terrain optimum, is the central open problem.
+The study is also in simulation with reference optima computed offline, and the open-loop CPG has a narrow terrain envelope: beyond roughly $10^{\circ}$ of incline, and on declines, no fixed parameter set keeps it upright, so controller fragility rather than the adaptation method limits generalization to steeper terrain.
+Coupling the agent to closed-loop attitude feedback and validating on hardware are natural next steps.
 
 \section{CONCLUSIONS}
 
-We showed that the CPG parameters producing stable quadruped locomotion shift with the terrain, so that a gait tuned for flat ground becomes unstable on an incline, and that resuming stable walking requires online adaptation.
-We proposed an event-triggered scheme in which a prediction-error monitor detects the terrain change and an adaptation method re-tunes the CPG within the same walking bout, and we compared grid search, Bayesian optimization, and an autoregressive active inference agent as that method.
-On a flat-to-incline transition over $100$ trials, the active inference agent matched an oracle with prior knowledge of the incline optimum and roughly halved the fall rate relative to the black-box optimizers, which destabilize the robot while probing candidate gaits.
-Selecting parameters from a learned model, rather than by physical trial, is what makes online adaptation possible without sacrificing stability.
+We showed that the CPG parameters producing stable quadruped locomotion shift with the terrain, so that a gait tuned for flat ground becomes unstable on an incline, and that across repeated transitions the terrain-matched optimum confers a durable survival advantage, so resuming stable walking calls for online adaptation.
+We proposed an event-triggered scheme in which a prediction-error monitor detects each terrain change and an adaptation method re-tunes the CPG within the same walking bout, and we compared grid search, Bayesian optimization, and an autoregressive active inference agent as that method.
+Online black-box search roughly doubles the fall rate by destabilizing the robot while probing candidate gaits, whereas the active inference agent selects from a learned model and avoids this harm; and once its goal prior encodes attitude stability rather than velocity, it significantly outperforms keeping the incumbent gait on a sustained transition, with the information-seeking term of the free energy essential to the gain.
+Selecting parameters from a model rather than by physical trial avoids destabilization, and encoding stability in the agent's goal turns caution into improvement; making that improvement robust across recurring transitions, where the terrain optimum remains out of the model's reach, is the main direction for future work.
 
 
 % Re-enable this last-page column-balancing hack for the camera-ready version.

@@ -129,19 +129,33 @@ def make_terrain_figs():
 
 # ── Figure 2: optimal parameters per terrain ─────────────────────────────────
 
+# Only show parameters whose flat and sloped optima differ by more than this
+# (normalized) amount; the rest are identical across terrains and clutter the plot.
+PARAM_DIFF_THRESH = 0.02
+
+
 def make_param_fig():
     flat_p, slope_p = load_params()
     lo, hi = bounds_lower.numpy(), bounds_upper.numpy()
     nf = (flat_p - lo) / (hi - lo)
     ns = (slope_p - lo) / (hi - lo)
 
-    x = np.arange(8)
+    # Keep only the parameters that actually shift between the two terrains.
+    diff = np.abs(nf - ns)
+    keep = np.where(diff > PARAM_DIFF_THRESH)[0]
+    nf, ns = nf[keep], ns[keep]
+    labels = [PARAM_LABELS[i] for i in keep]
+    dropped = [PARAM_LABELS[i] for i in range(8) if i not in keep]
+    print(f"showing {len(keep)} differing params {labels}; "
+          f"omitting {len(dropped)} near-identical {dropped}")
+
+    x = np.arange(len(keep))
     w = 0.38
-    fig, ax = plt.subplots(figsize=(6.6, 2.7))
+    fig, ax = plt.subplots(figsize=(0.95 * len(keep) + 1.6, 2.7))
     ax.bar(x - w / 2, nf, w, color=C_FLAT, label="flat optimum")
     ax.bar(x + w / 2, ns, w, color=C_SLOPE, label=r"$10^\circ$ incline optimum")
     ax.set_xticks(x)
-    ax.set_xticklabels(PARAM_LABELS, fontsize=11)
+    ax.set_xticklabels(labels, fontsize=11)
     ax.set_ylabel("normalized value", fontsize=10)
     ax.set_ylim(0, 1.08)
     ax.set_yticks([0, 0.5, 1.0])
