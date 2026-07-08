@@ -31,10 +31,7 @@ from scipy.linalg import det, inv
 from scipy.special import gamma, gammaln
 from scipy.stats import multivariate_normal
 
-from methods.cpg_bounds import (bounds, bounds_lower, bounds_upper,
-                                ALPHA_HOPF, PHI_TROT, THETA_TROT_INIT,
-                                H_LEG, D_STEP, leg_ik)
-from methods import terrain
+from methods.cpg_bounds import bounds, bounds_lower, bounds_upper
 
 
 # =============================================================================
@@ -59,15 +56,8 @@ class MARXAgent:
                  delay_inp=1,
                  delay_out=1,
                  time_horizon=1,
-                 num_iters=10,
-                 forgetting=1.0):
+                 num_iters=10):
 
-        # Exponential forgetting factor λ ∈ (0, 1] applied to the accumulated
-        # sufficient statistics on every update. λ = 1 recovers the standard
-        # (non-forgetting) matrix-normal update; λ < 1 makes the posterior decay
-        # old data with effective window ~1/(1-λ) samples, so the model can
-        # track non-stationary dynamics (e.g. flat → slope) online.
-        self.forgetting = float(forgetting)
         self.Dy = Dy
         self.Dx = Du * (delay_inp + 1) + Dy * delay_out
         self.Du = Du
@@ -79,56 +69,18 @@ class MARXAgent:
         self.Λ = coefficients_row_covariance                # row precision
         self.Ω = precision_scale                            # precision scale
         self.ν = precision_degrees
-        # Keep the initial prior so forgetting decays the posterior *toward the
-        # prior* (not toward zero); this keeps Λ and Ω positive-definite and
-        # numerically stable even with poorly-excited regressors.
-        self.Λ_prior = np.array(coefficients_row_covariance, dtype=float).copy()
-        self.Ω_prior = np.array(precision_scale, dtype=float).copy()
-        self.ν_prior = float(precision_degrees)
         self.μ = control_prior_mean
         self.Υ = control_prior_precision
         self.goal_prior = goal_prior
         self.thorizon = time_horizon
         self.num_iters = num_iters
         self.free_energy = float('inf')
-        # Count of data points assimilated (persists across trials, unlike the
-        # buffers). Used to decide when the model is informed enough to drive
-        # action selection — robust to forgetting, which keeps ν bounded.
-        self.n_updates = 0
-        # Cache of prediction constants (inverses, M.T, ...). The posterior is
-        # fixed during a prediction/EFE rollout, so these are computed once and
-        # reused; invalidated (set to None) whenever the posterior changes.
-        self._const = None
-        # Cached parametric EFE solver (built once, reused with new numeric
-        # parameters + warm start) and the last solution for warm-starting.
-        self._efe_solver = None
-        self._efe_sig = None
-        self._efe_u_prev = None
-
-    def set_goal_velocity(self, target_velocity):
-        """Switch the forward-velocity target (non-stationary task). Replaces the
-        goal-prior mean (same covariance) and invalidates the cached EFE solver,
-        which bakes m_star in as a constant — so the next minimizeEFE() rebuilds
-        with the new target. The learned dynamics model is kept, so the agent
-        re-plans for the new speed using everything it already knows."""
-        cov = np.asarray(self.goal_prior.cov, float)
-        mean = np.asarray(self.goal_prior.mean, float).copy()
-        mean[0] = float(target_velocity)
-        self.goal_prior = multivariate_normal(mean, cov)
-        self._efe_solver = None
-        self._efe_sig = None
 
     def update(self, y_k, u_k):
-        λ = self.forgetting
-        # Forget toward the prior: blend the current posterior statistics with
-        # the prior by (1-λ) before assimilating the new datum. λ = 1 leaves the
-        # statistics unchanged (standard non-forgetting update); λ < 1 caps the
-        # effective memory at ~1/(1-λ) samples while keeping Λ0, Ω0 ⪰ (1-λ)·prior
-        # so both stay positive-definite.
         M0 = self.M
-        Λ0 = λ * self.Λ + (1.0 - λ) * self.Λ_prior
-        Ω0 = λ * self.Ω + (1.0 - λ) * self.Ω_prior
-        ν0 = λ * self.ν + (1.0 - λ) * self.ν_prior
+        Λ0 = self.Λ
+        Ω0 = self.Ω
+        ν0 = self.ν
 
         self.ubuffer = self.backshift(self.ubuffer, u_k)
         x_k = np.concatenate([self.ubuffer.flatten(), self.ybuffer.flatten()])
@@ -136,17 +88,12 @@ class MARXAgent:
         X = np.outer(x_k, x_k)
         Ξ = np.outer(x_k, y_k) + np.dot(Λ0, M0)
 
-        Λ_new = Λ0 + X
         self.ν = ν0 + 1
-        self.Λ = Λ_new
-        Ω_new = (Ω0 + np.outer(y_k, y_k) + np.dot(M0.T, np.dot(Λ0, M0))
-                 - np.dot(Ξ.T, np.dot(inv(Λ_new), Ξ)))
-        self.Ω = 0.5 * (Ω_new + Ω_new.T)   # symmetrize against round-off drift
-        self.M = np.dot(inv(Λ_new), Ξ)
+        self.Λ = Λ0 + X
+        self.Ω = Ω0 + np.outer(y_k, y_k) + np.dot(M0.T, np.dot(Λ0, M0)) - np.dot(Ξ.T, np.dot(inv(Λ0 + X), Ξ))
+        self.M = np.dot(inv(Λ0 + X), Ξ)
 
         self.ybuffer = self.backshift(self.ybuffer, y_k)
-        self.n_updates += 1
-        self._const = None   # posterior changed -> invalidate prediction cache
         return None
 
     def params(self):
@@ -157,76 +104,30 @@ class MARXAgent:
         return -0.5 * (self.Dy * np.log(η * np.pi) - np.log(det(Ψ)) - 2 * self.logmultigamma(self.Dy, (η + self.Dy) / 2) +
                        2 * self.logmultigamma(self.Dy, (η + self.Dy - 1) / 2) + (η + self.Dy) * np.log(1 + 1 / η * np.dot((y - μ).T, np.dot(Ψ, (y - μ)))))
 
-    def predictive_constants(self):
-        """Precompute (and cache) the constants the predictive distribution and
-        EFE need. The posterior (M, Λ, Ω, ν) is fixed during a prediction / EFE
-        rollout, so these are computed once and reused; the cache is invalidated
-        on every `update`. All values are numeric, so they can be handed to
-        CasADi as `ca.DM` constants — leaving only matmuls in the symbolic graph.
-        """
-        if self._const is None:
-            inv_O = inv(self.Ω)
-            self._const = {
-                "M_T":              self.M.T,                       # (Dy, Dx)
-                "inv_Lambda":       inv(self.Λ),                    # (Dx, Dx)
-                "inv_Omega":        inv_O,                          # (Dy, Dy)
-                "Omega":            np.asarray(self.Ω),             # (Dy, Dy)
-                "eta":              float(self.ν - self.Dy + 1),
-                "logdet_inv_Omega": float(slogdet(inv_O)[1]),
-            }
-        return self._const
-
     def posterior_predictive(self, x_t):
-        """Student-t predictive: returns (eta, mean, precision Psi).
+        """Student-t predictive distribution."""
+        η_t = self.ν - self.Dy + 1
+        μ_t = np.dot(self.M.T, x_t)
+        Ψ_t = (self.ν - self.Dy + 1) * inv(self.Ω) / (1 + np.dot(x_t, np.dot(inv(self.Λ), x_t)))
+        return η_t, μ_t, Ψ_t
 
-        Uses cached constants — no matrix inversion per call. With
-        s = 1 + xᵀΛ⁻¹x: mean = Mᵀx, Psi = (eta/s)·Ω⁻¹, and the predictive
-        covariance is the closed form s/(eta-2)·Ω (see `predictions`).
-        """
-        c = self.predictive_constants()
-        eta = c["eta"]
-        x_t = np.asarray(x_t, dtype=float)
-        mu_t = c["M_T"] @ x_t
-        scale = 1.0 + float(x_t @ (c["inv_Lambda"] @ x_t))
-        Psi_t = (eta / scale) * c["inv_Omega"]
-        return eta, mu_t, Psi_t
+    def predictions(self, controls, time_horizon=1):
+        m_y = np.zeros((self.Dy, time_horizon))
+        S_y = np.zeros((self.Dy, self.Dy, time_horizon))
 
-    def predictions(self, controls, time_horizon=None):
-        """Roll the posterior predictive forward H steps under `controls`
-        (shape (Du, H); (H, Du) or flat length H·Du are also accepted). Returns
-        per-step mean m_y (Dy, H) and covariance S_y (Dy, Dy, H).
+        ybuffer = self.ybuffer
+        ubuffer = self.ubuffer
 
-        Optimized for speed and CasADi readiness:
-          * constants (Mᵀ, Λ⁻¹, Ω, eta) are precomputed once via
-            `predictive_constants` — no inversion inside the loop;
-          * the predictive covariance uses the closed form
-            S = [scale/(eta-2)]·Ω, scale = 1 + xᵀΛ⁻¹x (no inverse of Psi);
-          * the per-step map is purely mean = Mᵀx and scale = 1 + xᵀΛ⁻¹x, i.e.
-            matmuls with constant matrices, so these exact expressions transcribe
-            directly into a CasADi graph (constants as ca.DM, controls as ca.MX)
-            — the same form already used inside `minimizeEFE`.
-        """
-        H = self.thorizon if time_horizon is None else int(time_horizon)
-        controls = np.atleast_2d(np.asarray(controls, dtype=float))
-        if controls.shape != (self.Du, H):       # accept (H, Du) or flat
-            controls = controls.reshape(H, self.Du).T
+        for t in range(time_horizon):
+            ubuffer = self.backshift(ubuffer, controls[:, t])
+            x_t = np.concatenate([ubuffer.flatten(), ybuffer.flatten()])
 
-        c = self.predictive_constants()
-        eta, M_T, inv_L, Omega = c["eta"], c["M_T"], c["inv_Lambda"], c["Omega"]
-        cov_factor = 1.0 / (eta - 2.0)
+            η_t, μ_t, Ψ_t = self.posterior_predictive(x_t)
+            m_y[:, t] = μ_t
+            S_y[:, :, t] = inv(Ψ_t) * η_t / (η_t - 2)
 
-        m_y = np.zeros((self.Dy, H))
-        S_y = np.zeros((self.Dy, self.Dy, H))
-        ubuf = self.ubuffer.copy()
-        ybuf = self.ybuffer.copy()
-        for t in range(H):
-            ubuf = self.backshift(ubuf, controls[:, t])
-            x_t = np.concatenate([ubuf.flatten(), ybuf.flatten()])
-            mu_t = M_T @ x_t
-            scale = 1.0 + float(x_t @ (inv_L @ x_t))
-            m_y[:, t] = mu_t
-            S_y[:, :, t] = (scale * cov_factor) * Omega
-            ybuf = self.backshift(ybuf, mu_t)
+            ybuffer = self.backshift(ybuffer, m_y[:, t])
+
         return m_y, S_y
 
     def mutualinfo(self, x):
@@ -257,116 +158,25 @@ class MARXAgent:
 
         return J
 
-    def _build_efe_solver(self, lambda_energy, max_iter, tol, verbose,
-                          epistemic=True):
-        """Build (once) a parametric IPOPT solver for the EFE problem.
-
-        The posterior constants (Mᵀ, Λ⁻¹, eta, logdet Ω⁻¹, tr[S⁻¹Ω]) and the AR
-        buffers are CasADi *parameters* `p`, so the compiled solver is reused
-        across timesteps / trials — only the numeric `p` and the warm-start `x0`
-        change. The goal and control-prior terms are fixed at construction, so
-        they are baked in as constants. Rebuilt only if the signature (horizon,
-        dims, lambda_energy, max_iter, tol, epistemic) changes.
-
-        `epistemic` toggles the information-seeking (uncertainty-dependent) part
-        of the EFE. With `epistemic=True` (default) the full EFE is used: the
-        mutual-information / ambiguity term (functions of the predictive scale
-        Σ_t) plus the goal cross-entropy. With `epistemic=False` those Σ_t-
-        dependent terms are dropped, leaving a plain goal-seeking MAP predictive
-        controller (goal-mean deviation + control prior) — the ablation baseline
-        that isolates what the active-inference machinery contributes.
-        """
-        Du, Dy, thorizon, Dx = self.Du, self.Dy, self.thorizon, self.Dx
-        Wu = self.ubuffer.shape[1]      # delay_inp + 1
-        Wy = self.ybuffer.shape[1]      # delay_out
-        n_u = thorizon * Du
-
-        u = ca.MX.sym('u', n_u)                       # decision variable
-        P_MT  = ca.MX.sym('MT', Dy * Dx)              # time-varying parameters
-        P_iL  = ca.MX.sym('iL', Dx * Dx)
-        P_eta = ca.MX.sym('eta', 1)
-        P_ld  = ca.MX.sym('ld', 1)
-        P_tr  = ca.MX.sym('tr', 1)
-        P_ub  = ca.MX.sym('ub', Du * Wu)
-        P_yb  = ca.MX.sym('yb', Dy * Wy)
-        p_sym = ca.vertcat(P_MT, P_iL, P_eta, P_ld, P_tr, P_ub, P_yb)
-
-        M_T   = ca.reshape(P_MT, Dy, Dx)
-        inv_L = ca.reshape(P_iL, Dx, Dx)
-        eta, logdet, trv = P_eta, P_ld, P_tr
-        ubuf  = ca.reshape(P_ub, Du, Wu)
-        ybuf  = ca.reshape(P_yb, Dy, Wy)
-
-        m_star     = ca.DM(np.asarray(self.goal_prior.mean, float).reshape(-1, 1))
-        inv_S_star = ca.DM(np.linalg.inv(self.goal_prior.cov))
-        mu_prior   = ca.DM(np.asarray(self.μ, float).reshape(-1, 1))
-        Upsilon    = ca.DM(np.asarray(self.Υ, float))
-
-        J = ca.MX(0)
-        for t in range(thorizon):
-            u_t = u[t * Du:(t + 1) * Du]
-            ubuf = ca.horzcat(u_t, ubuf[:, :-1])
-            x_t = ca.vertcat(ca.reshape(ubuf.T, -1, 1), ca.reshape(ybuf.T, -1, 1))
-            scale = 1.0 + (x_t.T @ inv_L @ x_t)
-            mu_t = M_T @ x_t
-            diff = mu_t - m_star
-            up_diff = u_t - mu_prior
-            cp = 0.5 * (up_diff.T @ Upsilon @ up_diff)
-            if epistemic:
-                # full EFE: information-seeking (ambiguity, ∝ Σ_t) + goal terms
-                mi = Dy * ca.log(eta) - Dy * ca.log(scale) + logdet
-                ce = 0.5 * (scale / (eta - 2) * trv + diff.T @ inv_S_star @ diff)
-                J = J + mi + ce + cp
-            else:
-                # greedy MAP: drop the Σ_t-dependent (info-seeking) terms,
-                # keeping only the goal-mean deviation and the control prior
-                ce = 0.5 * (diff.T @ inv_S_star @ diff)
-                J = J + ce + cp
-            if lambda_energy != 0.0:
-                J = J + lambda_energy * (u_t.T @ u_t)
-            ybuf = ca.horzcat(mu_t, ybuf[:, :-1])
-
-        opts = {
-            'print_time': False,
-            'ipopt.print_level': 5 if verbose else 0,
-            'ipopt.sb': 'yes',
-            'ipopt.max_iter': int(max_iter),
-            'ipopt.tol': float(tol),
-            'ipopt.acceptable_tol': max(10.0 * float(tol), 1e-2),
-            'ipopt.acceptable_iter': 5,
-            # exact Hessian (auto-diff): the control vector is small (thorizon*Du),
-            # so exact 2nd-order converges in far fewer iterations than L-BFGS.
-        }
-        self._efe_solver = ca.nlpsol(
-            'efe_solver', 'ipopt', {'x': u, 'f': J, 'p': p_sym}, opts)
-        self._efe_sig = (thorizon, Du, Dy, Dx, Wu, Wy,
-                         float(lambda_energy), int(max_iter), float(tol),
-                         bool(verbose), bool(epistemic))
-
     def minimizeEFE(self, u_0=None, verbose=False, control_lims=(-np.inf, np.inf),
-                    lambda_energy=0.0, max_iter=100, tol=1e-3, warm_start=True,
-                    epistemic=True):
-        """Minimize EFE via a cached, warm-started parametric IPOPT solver.
+                    lambda_energy=0.0, max_iter=200, tol=1e-6):
+        """Minimize EFE (+ optional ||u||^2 energy term) via CasADi/IPOPT.
 
-        The compiled solver is built once per (horizon, dims, lambda_energy,
-        max_iter, tol, epistemic) and reused; each call only updates the numeric
-        parameters (posterior constants + AR buffers) and the warm-start point.
-        Warm start is, in priority: explicit `u_0` → the previous solution →
-        the control prior mean. Returns the flat optimal control sequence (length
-        thorizon*Du). `control_lims` is a single (lo, hi) tuple or a per-dim list.
-        `epistemic=False` drops the information-seeking terms (greedy-MAP ablation).
+        control_lims can be a single (lo, hi) tuple applied to all dims, or a
+        list of per-dim (lo, hi) tuples of length thorizon*Du.
         """
-        Du, thorizon = self.Du, self.thorizon
+        Du = self.Du
+        thorizon = self.thorizon
         n_u = thorizon * Du
 
-        sig = (thorizon, Du, self.Dy, self.Dx, self.ubuffer.shape[1],
-               self.ybuffer.shape[1], float(lambda_energy), int(max_iter),
-               float(tol), bool(verbose), bool(epistemic))
-        if self._efe_solver is None or self._efe_sig != sig:
-            self._build_efe_solver(lambda_energy, max_iter, tol, verbose,
-                                   epistemic=epistemic)
+        if u_0 is None:
+            u_0 = 1e-8 * np.random.randn(n_u)
+        u_0 = np.asarray(u_0, dtype=float).reshape(-1)
+        if u_0.size != n_u:
+            u_0 = np.tile(np.asarray(self.μ, dtype=float), thorizon)
 
-        if (isinstance(control_lims, tuple) and len(control_lims) == 2
+        if (isinstance(control_lims, tuple)
+                and len(control_lims) == 2
                 and np.isscalar(control_lims[0])):
             lbx = np.full(n_u, float(control_lims[0]))
             ubx = np.full(n_u, float(control_lims[1]))
@@ -374,32 +184,66 @@ class MARXAgent:
             lbx = np.array([b[0] for b in control_lims], dtype=float)
             ubx = np.array([b[1] for b in control_lims], dtype=float)
 
-        if u_0 is not None:
-            x0 = np.asarray(u_0, dtype=float).reshape(-1)
-            if x0.size != n_u:
-                x0 = np.tile(np.asarray(self.μ, float), thorizon)
-        elif warm_start and self._efe_u_prev is not None and self._efe_u_prev.size == n_u:
-            x0 = self._efe_u_prev
-        else:
-            x0 = np.tile(np.asarray(self.μ, float), thorizon)
-
-        # Pack the time-varying parameters (column-major, to match ca.reshape).
-        c = self.predictive_constants()
+        Dy = self.Dy
+        eta = float(self.ν - Dy + 1)
+        inv_L = np.linalg.inv(self.Λ)
+        M_T = self.M.T
+        m_star = np.asarray(self.goal_prior.mean, dtype=float).reshape(-1, 1)
         inv_S_star = np.linalg.inv(self.goal_prior.cov)
         tr_iSOmega = float(np.trace(inv_S_star @ self.Ω))
-        p_val = np.concatenate([
-            np.asarray(c["M_T"], float).flatten('F'),
-            np.asarray(c["inv_Lambda"], float).flatten('F'),
-            [c["eta"]], [c["logdet_inv_Omega"]], [tr_iSOmega],
-            np.asarray(self.ubuffer, float).flatten('F'),
-            np.asarray(self.ybuffer, float).flatten('F'),
-        ])
+        mu_prior = np.asarray(self.μ, dtype=float).reshape(-1, 1)
+        Upsilon = np.asarray(self.Υ, dtype=float)
+        log_inv_O_det = float(slogdet(np.linalg.inv(self.Ω))[1])
 
-        sol = self._efe_solver(x0=x0, lbx=lbx, ubx=ubx, p=p_val)
-        u_opt = np.array(sol['x']).reshape(-1)
-        if warm_start:
-            self._efe_u_prev = u_opt
-        return u_opt
+        ybuf = ca.DM(self.ybuffer)
+        ubuf = ca.DM(self.ubuffer)
+
+        u_sym = ca.MX.sym('u', n_u)
+        J_sym = ca.MX(0)
+
+        inv_L_dm      = ca.DM(inv_L)
+        M_T_dm        = ca.DM(M_T)
+        m_star_dm     = ca.DM(m_star)
+        inv_S_star_dm = ca.DM(inv_S_star)
+        mu_prior_dm   = ca.DM(mu_prior)
+        Upsilon_dm    = ca.DM(Upsilon)
+
+        for t in range(thorizon):
+            u_t = u_sym[t * Du:(t + 1) * Du]
+
+            ubuf = ca.horzcat(u_t, ubuf[:, :-1])
+            x_t = ca.vertcat(ca.reshape(ubuf.T, -1, 1),
+                             ca.reshape(ybuf.T, -1, 1))
+
+            scale = 1.0 + (x_t.T @ inv_L_dm @ x_t)
+            mi = Dy * ca.log(eta) - Dy * ca.log(scale) + log_inv_O_det
+
+            mu_t = M_T_dm @ x_t
+            diff = mu_t - m_star_dm
+            ce_mahal = diff.T @ inv_S_star_dm @ diff
+            ce = 0.5 * (scale / (eta - 2) * tr_iSOmega + ce_mahal)
+
+            up_diff = u_t - mu_prior_dm
+            cp = 0.5 * (up_diff.T @ Upsilon_dm @ up_diff)
+
+            J_sym = J_sym + mi + ce + cp
+            if lambda_energy != 0.0:
+                J_sym = J_sym + lambda_energy * (u_t.T @ u_t)
+
+            ybuf = ca.horzcat(mu_t, ybuf[:, :-1])
+
+        nlp = {'x': u_sym, 'f': J_sym}
+        opts = {
+            'print_time': False,
+            'ipopt.print_level': 5 if verbose else 0,
+            'ipopt.sb': 'yes',
+            'ipopt.max_iter': int(max_iter),
+            'ipopt.tol': float(tol),
+            'ipopt.hessian_approximation': 'limited-memory',
+        }
+        solver = ca.nlpsol('efe_solver', 'ipopt', nlp, opts)
+        sol = solver(x0=u_0, lbx=lbx, ubx=ubx)
+        return np.array(sol['x']).reshape(-1)
 
     def backshift(self, x, a):
         if x.ndim == 2:
@@ -462,19 +306,72 @@ class MARXAgent:
 # mu_i ± n_sigma * sigma_i.
 n_sigma = 2.0
 
+# CPG phase classification thresholds for feedback mode switching.
+SWING_ENTER, SWING_EXIT, STANCE_ENTER, STANCE_EXIT = 0.15, 0.02, -0.15, -0.02
+phase_state_memory = []
 quadruped          = None
 joint_IDs_full     = None
 filtered_joint_IDs = None
 feet_joint_IDs     = None
 
-# Parameters held by the previous trial, used to smoothly interpolate the new
-# per-trial parameter selection over the transition window (same scheme as the
-# BO baseline in run_cpg_trial). Reset to None at the start of each optimization.
-_prev_params_marx  = None
 
-# Trained agent from the most recent marxefe_optimize_cpg call (for post-hoc
-# evaluation episodes such as transition-recovery traces).
-_last_agent        = None
+def get_phase(y_val, leg_idx,
+              swing_enter=SWING_ENTER,
+              swing_exit=SWING_EXIT,
+              stance_enter=STANCE_ENTER,
+              stance_exit=STANCE_EXIT):
+    """Classify CPG phase from y value with hysteresis.
+    Uses global phase_state_memory to maintain state per leg.
+    """
+    global phase_state_memory
+    current_state = phase_state_memory[leg_idx]
+    if current_state == 'swing':
+        new_state = 'transition' if y_val < swing_exit else 'swing'
+    elif current_state == 'stance':
+        new_state = 'transition' if y_val > stance_exit else 'stance'
+    else:
+        if y_val > swing_enter:
+            new_state = 'swing'
+        elif y_val < stance_enter:
+            new_state = 'stance'
+        else:
+            new_state = 'transition'
+    phase_state_memory[leg_idx] = new_state
+    return new_state
+
+
+def compute_feedback_u(x_vec, y_vec, w_vec, k_matrix, contacts, phases,
+                       F_fast, contact_touch, contact_unload,
+                       coupling_gain, STOP_gain):
+    """Righetti-style STOP/FAST feedback. Same structure as the BO pipeline."""
+    n_legs    = len(x_vec)
+    u_fb      = np.zeros(n_legs)
+    coupling_y = coupling_gain * (k_matrix @ y_vec)
+    modes      = []
+    for j in range(n_legs):
+        yj      = y_vec[j]
+        xj      = x_vec[j]
+        wj      = w_vec[j]
+        contact = contacts[j]
+        phase   = phases[j]
+        if phase == 'swing':
+            if contact < contact_touch:
+                u_fb[j] = STOP_gain * (wj * xj - coupling_y[j])
+                modes.append("STOP")
+            else:
+                u_fb[j] = np.sign(yj) * F_fast
+                modes.append("FAST")
+        elif phase == 'stance':
+            if contact > contact_unload:
+                u_fb[j] = STOP_gain * (wj * xj - coupling_y[j])
+                modes.append("STOP")
+            else:
+                u_fb[j] = np.sign(yj) * F_fast
+                modes.append("FAST")
+        else:
+            u_fb[j] = 0.0
+            modes.append("NORMAL")
+    return u_fb, modes
 
 
 # =============================================================================
@@ -496,7 +393,7 @@ def load_environment(dt, use_gui=False):
     p.setGravity(0, 0, -9.8)
     p.setTimeStep(dt)
     p.setRealTimeSimulation(0)
-    terrain.build_ground(p)   # body 0; flat (plane.urdf) by default
+    p.loadURDF("plane.urdf")
     return p
 
 
@@ -584,132 +481,19 @@ def get_base_orientation(p, robot, ori_default):
 
 
 def extract_observation(p, robot, ori_default):
-    """Observation y_k = [vx, vy, pitch, roll] for MARXEFE (Dy=4).
-
-    The agent tracks a *target forward velocity*: vx = forward (+Y) base
-    velocity, vy = lateral (X) base velocity. Velocity is a stationary,
-    well-posed target for the linear AR model — unlike absolute position,
-    which is an unbounded integrator state and led the EFE selection to
-    extrapolate to destabilising parameters. Absolute base_pos is still
-    returned for metric logging and fall detection (the evaluation objective
-    J remains position-based and identical across all methods).
+    """Observation y_k = [pos_x, pos_y, pitch, roll] for MARXEFE (Dy=4).
+    pos_x = base_pos[1] (forward +Y); pos_y = base_pos[0] (lateral X).
     """
     base_pos, base_orientation = get_base_orientation(p, robot, ori_default)
-    base_vel, _ = p.getBaseVelocity(robot)
-    vx = base_vel[1]   # forward +Y
-    vy = base_vel[0]   # lateral  X
-    # Physical convention: with the robot walking in +Y, getEulerFromQuaternion
-    # returns (forward nose-pitch, lateral bank-roll, yaw), so unpack as
-    # pitch, roll, yaw (euler[0] is the physical pitch, euler[1] the physical roll).
-    pitch, roll, yaw = p.getEulerFromQuaternion(base_orientation)
-    y_k = np.array([vx, vy, pitch, roll])
+    pos_x = base_pos[1]   # forward +Y
+    pos_y = base_pos[0]   # lateral  X
+    roll, pitch, yaw = p.getEulerFromQuaternion(base_orientation)
+    y_k = np.array([pos_x, pos_y, pitch, roll])
     return y_k, base_pos, base_orientation
 
 
-class JointCPG:
-    """Self-contained joint-space Righetti-style CPG (the validated controller).
-
-    Encapsulates the four coupled Hopf oscillators, the Righetti STOP/FAST
-    contact feedback, the per-leg phase hysteresis, and the CPG→joint mapping.
-    One instance per episode; call :meth:`step` each control tick.
-
-    8-D parameter vector (matches ``methods.cpg_bounds``):
-      [coupling_gain, w_swing, w_stance, F_FAST, STOP_GAIN, hip_amp, knee_amp, b]
-
-    This is the joint-space mapping shared with ``methods.bo_optimizer`` — it
-    replaces the Zhang-et-al. Cartesian foot-trajectory + IK controller, which
-    was laterally unstable on Laikago under position control.
-    """
-
-    ALPHA = 3.0
-    BETA = 12.0
-    U = 2.0
-    HIP_OFFSET = 0.26
-    KNEE_OFFSET = -1.0
-    SWING_ENTER, SWING_EXIT = 0.15, 0.02
-    STANCE_ENTER, STANCE_EXIT = -0.15, -0.02
-    DEBOUNCE_THRESHOLD = 2
-    K = np.array([[0, -1, -1, 1],
-                  [-1, 0, 1, -1],
-                  [-1, 1, 0, -1],
-                  [1, -1, -1, 0]], dtype=float)
-
-    def __init__(self, n_legs=4):
-        self.n = n_legs
-        theta = [0, np.pi / 2, np.pi, 3 * np.pi / 2]
-        self.x = np.array([np.sqrt(self.U) * np.cos(t) for t in theta])
-        self.y = np.array([np.sqrt(self.U) * np.sin(t) for t in theta])
-        self.deb = np.zeros(n_legs, dtype=int)
-        self.cc = np.zeros(n_legs, dtype=int)
-        self.phase = []
-        for j in range(n_legs):
-            if self.y[j] > self.SWING_ENTER:
-                self.phase.append("swing")
-            elif self.y[j] < self.STANCE_ENTER:
-                self.phase.append("stance")
-            else:
-                self.phase.append("transition")
-
-    def _get_phase(self, y_val, j):
-        s = self.phase[j]
-        if s == "swing":
-            s = "transition" if y_val < self.SWING_EXIT else "swing"
-        elif s == "stance":
-            s = "transition" if y_val > self.STANCE_EXIT else "stance"
-        else:
-            if y_val > self.SWING_ENTER:
-                s = "swing"
-            elif y_val < self.STANCE_ENTER:
-                s = "stance"
-            else:
-                s = "transition"
-        self.phase[j] = s
-        return s
-
-    def step(self, params_8d, raw_contacts, dt):
-        """Advance one control tick; return (hip_angles, knee_angles) arrays."""
-        coupling_gain, w_swing, w_stance, F_FAST, STOP_GAIN, hip_amp, knee_amp, b = params_8d
-        x_prev, y_prev = self.x.copy(), self.y.copy()
-
-        # radial state + intrinsic frequency (swing/stance blended by y)
-        w_vec = w_stance / (np.exp(-b * y_prev) + 1.0) + w_swing / (np.exp(b * y_prev) + 1.0)
-        r_vec = np.sqrt(x_prev ** 2 + y_prev ** 2)
-        x_new = x_prev + dt * (self.ALPHA * (self.U - r_vec ** 2) * x_prev - w_vec * y_prev)
-
-        # contact debounce
-        raw = np.asarray(raw_contacts, dtype=int)
-        for j in range(self.n):
-            if raw[j] == self.deb[j]:
-                self.cc[j] = 0
-            else:
-                self.cc[j] += 1
-            if self.cc[j] >= self.DEBOUNCE_THRESHOLD:
-                self.deb[j] = raw[j]
-                self.cc[j] = 0
-
-        # STOP/FAST feedback per leg
-        phases = [self._get_phase(y_prev[j], j) for j in range(self.n)]
-        coupling_y = coupling_gain * (self.K @ y_prev)
-        u_fb = np.zeros(self.n)
-        for j in range(self.n):
-            in_stop = ((phases[j] == "swing" and self.deb[j] < 0.5) or
-                       (phases[j] == "stance" and self.deb[j] > 0.5))
-            if in_stop:
-                u_fb[j] = STOP_GAIN * (w_vec[j] * x_prev[j] - coupling_y[j])
-            elif phases[j] in ("swing", "stance"):
-                u_fb[j] = np.sign(y_prev[j]) * F_FAST
-
-        y_new = y_prev + dt * (self.BETA * (self.U - r_vec ** 2) * y_prev
-                               + w_vec * x_prev + coupling_y + u_fb)
-
-        self.x, self.y = x_new, y_new
-        hip_angles = self.HIP_OFFSET + hip_amp * x_new
-        knee_angles = self.KNEE_OFFSET - knee_amp * np.maximum(0.0, y_new)
-        return hip_angles, knee_angles
-
-
 def reset_simulation(p, robot, filtered_joint_IDs, ori_default):
-    """Reset robot to neutral standing pose, settle, and return a fresh JointCPG."""
+    """Reset robot to neutral standing pose and run pre-trial settling."""
     start_position = [0.0, 0.0, 0.55]
     p.resetBasePositionAndOrientation(robot, start_position, ori_default)
     p.resetBaseVelocity(robot, [0, 0, 0], [0, 0, 0])
@@ -718,7 +502,6 @@ def reset_simulation(p, robot, filtered_joint_IDs, ori_default):
     hip_joint_ids       = [1, 5, 9, 13]
     knee_joint_ids      = [2, 6, 10, 14]
 
-    # Joint-space CPG stance pose (matches the BO pipeline's validated reset).
     for jid in abduction_joint_ids:
         p.resetJointState(robot, jid,  0.0)
     for jid in hip_joint_ids:
@@ -739,7 +522,16 @@ def reset_simulation(p, robot, filtered_joint_IDs, ori_default):
             p.setJointMotorControl2(robot, jid, p.POSITION_CONTROL, -1.0)
         p.stepSimulation()
 
-    return JointCPG(n_legs=4)
+    # Initialize CPG on limit cycle
+    n_legs = 4
+    u      = 2.0
+    cpg_x  = np.zeros(n_legs)
+    cpg_y  = np.zeros(n_legs)
+    theta  = [0, np.pi / 2, np.pi, 3 * np.pi / 2]
+    for i in range(n_legs):
+        cpg_x[i] = np.sqrt(u) * np.cos(theta[i])
+        cpg_y[i] = np.sqrt(u) * np.sin(theta[i])
+    return cpg_x, cpg_y
 
 
 # =============================================================================
@@ -750,78 +542,58 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
                         filtered_joint_IDs_arg, feet_joint_IDs_arg,
                         dt, episode_length=4.5,
                         lambda_energy=1e-2,
-                        target_forward_position=4.0,
-                        update_every=0, ramp_steps=20,
-                        target_schedule=None,
-                        debug=False):
+                        target_forward_position=4.0):
     """Run one MARXEFE-controlled episode.
     Trial structure: Phase1(100 steps settle, in reset) + Phase2(150 transition)
     + Phase3(300 steady) = 4.5 s at dt=0.01.
-
-    update_every : int
-        0  -> select parameters once per trial and hold them (BO-like; the
-              flat-terrain protocol).
-        >0 -> re-select via EFE every `update_every` steps for *online*
-              within-episode adaptation (e.g. mid-episode terrain changes),
-              ramping each new selection in over `ramp_steps` steps.
     """
     ori_default = [0.0, 0.5, 0.5, 0.0]
 
-    cpg = reset_simulation(p, robot, filtered_joint_IDs_arg, ori_default)
+    cpg_x, cpg_y = reset_simulation(p, robot, filtered_joint_IDs_arg, ori_default)
 
     n_legs = 4
     y_k, base_pos, base_orientation = extract_observation(p, robot, ori_default)
+
+    global phase_state_memory
+    phase_state_memory = []
+    for j in range(n_legs):
+        if   cpg_y[j] > SWING_ENTER:
+            phase_state_memory.append('swing')
+        elif cpg_y[j] < STANCE_ENTER:
+            phase_state_memory.append('stance')
+        else:
+            phase_state_memory.append('transition')
+
+    coupling_gain  = agent.μ[0]
+    w_swing        = agent.μ[1]
+    w_stance       = agent.μ[2]
+    F_FAST         = agent.μ[3]
+    STOP_GAIN      = agent.μ[4]
+    hip_amplitude  = agent.μ[5]
+    knee_amplitude = agent.μ[6]
+    b              = agent.μ[7]
+
+    alpha      = 3.0
+    beta       = 12.0
+    u          = 2.0
+    hip_offset  = 0.26
+    knee_offset = -1.0
+
+    contact_touch  = 0.5
+    contact_unload = 0.5
+    k_matrix = np.array([
+        [ 0, -1, -1,  1],
+        [-1,  0,  1, -1],
+        [-1,  1,  0, -1],
+        [ 1, -1, -1,  0]
+    ], dtype=float)
+
+    action_update_frequency = 50
 
     transition_duration = 1.5
     trial_duration      = episode_length
     num_steps           = int(trial_duration / dt)
     transition_steps    = int(transition_duration / dt)
-
-    # ------------------------------------------------------------------
-    # ACTION SELECTION (active inference)
-    # The 8 CPG parameters are gait hyperparameters, selected by minimising
-    # expected free energy under the current posterior. With update_every == 0
-    # they are chosen ONCE per trial and held, interpolated from the previous
-    # trial over the transition window (BO-like). With update_every > 0 they
-    # are RE-selected every `update_every` steps so the agent adapts online
-    # within the episode; each new selection is ramped in over `ramp_steps`
-    # steps to avoid the bang-bang chatter that toppled the robot when
-    # re-optimising every step. The posterior is updated every step regardless,
-    # so a mid-episode terrain change is reflected in the next selection.
-    # ------------------------------------------------------------------
-    global _prev_params_marx
-    bounds_agent = [(bounds_lower[i].item(), bounds_upper[i].item())
-                    for _ in range(agent.thorizon) for i in range(8)]
-    warmup_updates = 10   # need a little data before the model can drive control
-
-    def select_params():
-        """Minimise EFE under the current posterior; fall back to the control
-        prior mean if the model is still uninformative or the solve fails."""
-        if agent.n_updates < warmup_updates:
-            return np.array(agent.μ, dtype=float)
-        try:
-            # No explicit u_0 -> warm-start from the previous solution; loosened
-            # tolerance + cached parametric solver for a fast receding-horizon solve.
-            u_opt = agent.minimizeEFE(
-                control_lims  = bounds_agent,
-                lambda_energy = lambda_energy,
-                max_iter      = 100,
-                tol           = 1e-3,
-            )
-            return np.clip(np.asarray(u_opt[:8], dtype=float),
-                           bounds_lower.numpy(), bounds_upper.numpy())
-        except Exception as e:
-            print(f"Warning: EFE selection failed: {e}; using control prior mean.")
-            return np.array(agent.μ, dtype=float)
-
-    # Initial (trial-start) selection, ramped in from the previous trial's
-    # parameters over the long transition window.
-    seg_target = select_params()
-    seg_start  = (np.array(_prev_params_marx, dtype=float)
-                  if _prev_params_marx is not None else seg_target.copy())
-    seg_anchor = 0
-    seg_ramp   = transition_steps
-    applied    = seg_start.copy()
 
     times       = np.zeros(num_steps)
     y_history   = np.zeros((4, num_steps))
@@ -833,16 +605,6 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
 
     roll_angles  = np.zeros(num_steps)
     pitch_angles = np.zeros(num_steps)
-    yaw_angles   = np.zeros(num_steps)
-    target_log   = np.zeros(num_steps)
-    tsched = None if target_schedule is None else np.asarray(target_schedule, float)
-
-    if debug:
-        post_M_norm   = np.zeros(num_steps)
-        post_L_logdet = np.zeros(num_steps)
-        post_O_tr     = np.zeros(num_steps)
-        post_O_logdet = np.zeros(num_steps)
-        post_nu       = np.zeros(num_steps)
 
     n_joints    = 2 * n_legs
     torques_log = np.zeros((n_joints, num_steps))
@@ -851,6 +613,7 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
     vx_log      = np.zeros(num_steps)
     vy_log      = np.zeros(num_steps)
 
+    policy = np.tile(agent.μ, agent.thorizon) + 0.05 * rnd.randn(agent.Du * agent.thorizon)
     is_fallen = False
 
     leg_names      = ["FL", "FR", "RL", "RR"]
@@ -862,13 +625,6 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
     contact_change_count = np.zeros(n_legs, dtype=int)
     for k_step in range(num_steps):
         t = k_step * dt
-        # Non-stationary task: switch the velocity target when the schedule
-        # changes (rebuilds the EFE solver with the new goal; model is kept).
-        if tsched is not None:
-            v_now = float(tsched[min(k_step, len(tsched) - 1)])
-            if abs(v_now - float(agent.goal_prior.mean[0])) > 1e-9:
-                agent.set_goal_velocity(v_now)
-        target_log[k_step] = float(agent.goal_prior.mean[0])
         times[k_step]      = t
         y_history[:, k_step] = y_k
         goals_m[:, k_step]   = agent.goal_prior.mean
@@ -879,38 +635,76 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
         preds_m[:, k_step]  = mu_k
         preds_v[:, k_step]  = np.diag(inv(Psi_k) * eta_k / (eta_k - 2))
 
-        # Re-select parameters periodically for online within-episode adaptation
-        # (update_every > 0); otherwise the initial trial selection is held.
-        if update_every and k_step > 0 and (k_step % update_every == 0):
-            seg_start  = applied.copy()
-            seg_target = select_params()
-            seg_anchor = k_step
-            seg_ramp   = max(1, ramp_steps)
-
-        frac = min(1.0, (k_step - seg_anchor) / max(1, seg_ramp))
-        applied = seg_start + frac * (seg_target - seg_start)
-        applied = np.clip(applied, bounds_lower.numpy(), bounds_upper.numpy())
-        params_8d = applied
-
-        # Raw foot contacts for the CPG's STOP/FAST feedback
-        raw_contacts = np.array([
-            int(len(p.getContactPoints(bodyA=0, bodyB=robot,
-                                       linkIndexA=-1, linkIndexB=feet_joint_IDs_arg[j])) > 0)
-            for j in range(n_legs)
+        params_8d = np.array([
+            coupling_gain, w_swing, w_stance, F_FAST,
+            STOP_GAIN, hip_amplitude, knee_amplitude, b
         ])
+        params_8d = np.clip(params_8d, bounds_lower.numpy(), bounds_upper.numpy())
+        coupling_gain  = params_8d[0]
+        w_swing        = params_8d[1]
+        w_stance       = params_8d[2]
+        F_FAST         = params_8d[3]
+        STOP_GAIN      = params_8d[4]
+        hip_amplitude  = params_8d[5]
+        knee_amplitude = params_8d[6]
+        b              = params_8d[7]
 
-        # Joint-space CPG step → hip/knee targets
-        hip_angles, knee_angles = cpg.step(params_8d, raw_contacts, dt)
+        w_vec = np.zeros(n_legs)
+        r_vec = np.zeros(n_legs)
         for j in range(n_legs):
-            abd_joint, hip_joint, kn_joint = joint_IDs_full_arg[leg_names[j]]
-            p.setJointMotorControl2(robot, abd_joint, p.POSITION_CONTROL,
-                                    targetPosition=0.0, force=500)
-            p.setJointMotorControl2(robot, hip_joint, p.POSITION_CONTROL, hip_angles[j])
-            p.setJointMotorControl2(robot, kn_joint,  p.POSITION_CONTROL, knee_angles[j])
+            y_prev = cpg_y[j]
+            x_prev = cpg_x[j]
+            w = (w_stance / (np.exp(-b * y_prev) + 1) +
+                 w_swing  / (np.exp( b * y_prev) + 1))
+            w_vec[j] = w
+            r        = np.sqrt(x_prev ** 2 + y_prev ** 2)
+            r_vec[j] = r
+            cpg_x[j] += dt * (alpha * (u - r ** 2) * x_prev - w * y_prev)
 
-        # Spatially-varying friction: set the ground friction from the robot's
-        # current forward position (no-op unless this is a friction terrain).
-        terrain.apply_dynamic_friction(p, robot, base_pos[1])
+        raw_contacts = np.array([
+            int(len(p.getContactPoints(
+                bodyA=0, bodyB=robot,
+                linkIndexA=-1, linkIndexB=ID)) > 0)
+            for ID in feet_joint_IDs_arg
+        ])
+        for j in range(n_legs):
+            if raw_contacts[j] == debounced_contacts[j]:
+                contact_change_count[j] = 0
+            else:
+                contact_change_count[j] += 1
+                if contact_change_count[j] >= DEBOUNCE_THRESHOLD:
+                    debounced_contacts[j] = raw_contacts[j]
+                    contact_change_count[j] = 0
+        phases = [get_phase(cpg_y[j], j) for j in range(n_legs)]
+
+        u_fb, modes = compute_feedback_u(
+            x_vec=cpg_x, y_vec=cpg_y, w_vec=w_vec, k_matrix=k_matrix,
+            contacts=debounced_contacts, phases=phases, F_fast=F_FAST,
+            contact_touch=contact_touch, contact_unload=contact_unload,
+            coupling_gain=coupling_gain, STOP_gain=STOP_GAIN
+        )
+
+        for j in range(n_legs):
+            y_prev        = cpg_y[j]
+            x_prev        = cpg_x[j]
+            r             = r_vec[j]
+            w             = w_vec[j]
+            coupling_term = coupling_gain * np.dot(k_matrix[j, :], cpg_y)
+            cpg_y[j] += dt * (beta * (u - r ** 2) * y_prev +
+                               w * x_prev + coupling_term + u_fb[j])
+
+        for j in range(n_legs):
+            leg_name                       = leg_names[j]
+            abd_joint, hip_joint, kn_joint = joint_IDs_full_arg[leg_name]
+            p.setJointMotorControl2(
+                robot, abd_joint, p.POSITION_CONTROL,
+                targetPosition=0.0, force=500
+            )
+            hip_angle  = hip_offset  + hip_amplitude  * cpg_x[j]
+            knee_angle = knee_offset - knee_amplitude  * max(0, cpg_y[j])
+            p.setJointMotorControl2(robot, hip_joint, p.POSITION_CONTROL, hip_angle)
+            p.setJointMotorControl2(robot, kn_joint,  p.POSITION_CONTROL, knee_angle)
+
         p.stepSimulation()
 
         joint_idx = 0
@@ -933,23 +727,53 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
         vx_log[k_step] = base_vel[1]   # forward +Y
         vy_log[k_step] = base_vel[0]   # lateral  X
 
-        # Physical convention (+Y forward): euler[0]=pitch, euler[1]=roll.
-        pitch, roll, yaw = p.getEulerFromQuaternion(base_orientation)
+        roll, pitch, _ = p.getEulerFromQuaternion(base_orientation)
         roll_angles[k_step]  = roll
         pitch_angles[k_step] = pitch
-        yaw_angles[k_step]   = yaw
 
-        agent.update(y_k_new, params_8d)
-        u_history[:, k_step] = params_8d
+        agent.update(y_k_new, np.array([
+            coupling_gain, w_swing, w_stance, F_FAST,
+            STOP_GAIN, hip_amplitude, knee_amplitude, b
+        ]))
+        u_history[:, k_step] = [
+            coupling_gain, w_swing, w_stance, F_FAST,
+            STOP_GAIN, hip_amplitude, knee_amplitude, b
+        ]
 
-        if debug:
-            post_M_norm[k_step] = float(np.linalg.norm(agent.M, 'fro'))
-            sgnL, ldL = slogdet(agent.Λ)
-            post_L_logdet[k_step] = ldL if sgnL > 0 else np.nan
-            post_O_tr[k_step]     = float(np.trace(agent.Ω))
-            sgnO, ldO = slogdet(agent.Ω)
-            post_O_logdet[k_step] = ldO if sgnO > 0 else np.nan
-            post_nu[k_step]       = float(agent.ν)
+        if k_step > 0 and k_step % action_update_frequency == 0:
+            bounds_agent = []
+            for _ in range(agent.thorizon):
+                for i in range(8):
+                    bounds_agent.append((bounds_lower[i].item(), bounds_upper[i].item()))
+
+            try:
+                u_opt = agent.minimizeEFE(
+                    u_0           = policy,
+                    control_lims  = bounds_agent,
+                    lambda_energy = lambda_energy,
+                    max_iter      = 100,
+                    tol           = 1e-4,
+                )
+
+                if k_step < 2 * action_update_frequency:
+                    policy = np.tile(agent.μ, agent.thorizon)
+                else:
+                    policy = u_opt
+
+            except Exception as e:
+                print(f"Warning: EFE minimization failed at step {k_step}: {e}")
+                policy = np.tile(agent.μ, agent.thorizon)
+
+            u_t = policy[0:agent.Du]
+
+            coupling_gain  = u_t[0]
+            w_swing        = u_t[1]
+            w_stance       = u_t[2]
+            F_FAST         = u_t[3]
+            STOP_GAIN      = u_t[4]
+            hip_amplitude  = u_t[5]
+            knee_amplitude = u_t[6]
+            b              = u_t[7]
 
         y_k = y_k_new
 
@@ -964,26 +788,10 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
             base_pos_log  = base_pos_log[:actual_steps, :]
             roll_angles   = roll_angles[:actual_steps]
             pitch_angles  = pitch_angles[:actual_steps]
-            yaw_angles    = yaw_angles[:actual_steps]
-            target_log    = target_log[:actual_steps]
             vx_log        = vx_log[:actual_steps]
             vy_log        = vy_log[:actual_steps]
-            if debug:
-                y_history     = y_history[:, :actual_steps]
-                u_history     = u_history[:, :actual_steps]
-                preds_m       = preds_m[:, :actual_steps]
-                preds_v       = preds_v[:, :actual_steps]
-                goals_m       = goals_m[:, :actual_steps]
-                post_M_norm   = post_M_norm[:actual_steps]
-                post_L_logdet = post_L_logdet[:actual_steps]
-                post_O_tr     = post_O_tr[:actual_steps]
-                post_O_logdet = post_O_logdet[:actual_steps]
-                post_nu       = post_nu[:actual_steps]
             num_steps     = actual_steps
             break
-
-    # Carry the final applied parameters into the next trial's ramp start.
-    _prev_params_marx = np.array(applied, dtype=float).copy()
 
     # ------------------------------------------------------------------
     # POST-EPISODE METRICS — steady-state window only
@@ -1001,7 +809,7 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
     else:
         combined_stability = 1000.0
 
-    if len(base_pos_log) > start_idx:
+    if len(base_pos_log) > 0:
         forward_distance = base_pos_log[-1, 1] - base_pos_log[0, 1]
         lateral_drift    = abs(base_pos_log[-1, 0] - base_pos_log[0, 0])
         T_steady  = (len(base_pos_log) - start_idx) * dt
@@ -1013,16 +821,16 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
         CoT = (mech_pwr / (10.0 * 9.81 * fwd_steady)
                if fwd_steady > 0.001 else 1000.0)
         CoT = min(CoT, 200.0)
-    elif len(base_pos_log) > 0:
-        forward_distance = base_pos_log[-1, 1] - base_pos_log[0, 1]
-        lateral_drift    = abs(base_pos_log[-1, 0] - base_pos_log[0, 0])
-        mean_vx          = 0.0
-        CoT              = 200.0
     else:
         forward_distance = 0.0
         lateral_drift    = 0.0
         mean_vx          = 0.0
         CoT              = 1000.0
+
+    params_8d = np.array([
+        coupling_gain, w_swing, w_stance, F_FAST,
+        STOP_GAIN, hip_amplitude, knee_amplitude, b
+    ])
 
     trial_data = {
         "t":                   times,
@@ -1032,8 +840,7 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
         "vy":                  vy_log,
         "roll":                roll_angles,
         "pitch":               pitch_angles,
-        "yaw":                 yaw_angles,
-        "target":              target_log,
+        "yaw":                 np.zeros_like(times),
         "forces":              np.zeros((len(times), n_legs)),
         "torques":             torques_log.T,
         "qdot":                qdot_log.T,
@@ -1046,24 +853,10 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
         "stability":           combined_stability,
         "mean_vx":             mean_vx,
         "CoT":                 CoT,
-        "dt":                  dt,
-        "r_cpg":               np.zeros((n_legs, len(times))),
-        "theta_cpg":           np.zeros((n_legs, len(times))),
+        "x_cpg":               np.zeros((n_legs, len(times))),
+        "y_cpg":               np.zeros((n_legs, len(times))),
         "final_params_8d":     params_8d,
     }
-    if debug:
-        trial_data.update({
-            "y_history":     y_history,
-            "u_history":     u_history,
-            "preds_m":       preds_m,
-            "preds_v":       preds_v,
-            "goals_m":       goals_m,
-            "post_M_norm":   post_M_norm,
-            "post_L_logdet": post_L_logdet,
-            "post_O_tr":     post_O_tr,
-            "post_O_logdet": post_O_logdet,
-            "post_nu":       post_nu,
-        })
     return trial_data
 
 
@@ -1072,16 +865,10 @@ def run_episode_maxrefe(agent, robot, joint_IDs_full_arg,
 # =============================================================================
 
 def compute_objective(trial_data: dict,
-                      target_velocity: float,
+                      target_forward_position: float,
                       robot_mass: float,
                       g: float = 9.81) -> float:
-    """Velocity-tracking objective J — identical to methods.bo_optimizer.
-
-        J = w1 * Σ_steady dt * min(exp(-‖v_xy - v*_xy‖² / 0.05), l_r) - w2 * CoT
-
-    with v*_xy = [target_velocity, 0], w1 = 1, w2 = 0.5, l_r = 0.85 (Zhang et al.
-    IROS 2024, eq. 9). Shared with BO/grid so the three methods score identically.
-    """
+    """Compute J = position_reward - w2*CoT_norm - w3*stability."""
     t                   = trial_data["t"]
     transition_duration = trial_data["transition_duration"]
     steady_idx          = np.searchsorted(t, transition_duration)
@@ -1089,24 +876,41 @@ def compute_objective(trial_data: dict,
     if steady_idx >= len(t) - 5:
         return -50.0
 
-    dt = trial_data.get("dt", t[1] - t[0] if len(t) > 1 else 0.01)
-    vx_steady      = np.asarray(trial_data["vx"][steady_idx:])
-    vy_steady      = np.asarray(trial_data["vy"][steady_idx:])
+    pos_x_steady   = trial_data["pos_x"][steady_idx:]
+    pos_y_steady   = trial_data["pos_y"][steady_idx:]
     torques_steady = trial_data["torques"][steady_idx:, :]
     qdot_steady    = trial_data["qdot"][steady_idx:, :]
     bpos_steady    = trial_data["base_pos"][steady_idx:, :]
+    T              = len(pos_x_steady)
 
-    w1, w2, l_r = 1.0, 0.5, 0.85
-    err = ((vx_steady - target_velocity) ** 2 + vy_steady ** 2) / 0.05
-    reward = np.minimum(np.exp(-err), l_r)
-    velocity_term = w1 * dt * np.sum(reward)
+    w1          = 5.0
+    l_r         = 0.85
+    sigma_pos_x = 1.0
+    sigma_pos_y = 0.1
+    R_p_sum     = 0.0
+    for i in range(T):
+        err_sq = ((pos_x_steady[i] - target_forward_position) / sigma_pos_x) ** 2 \
+               + (pos_y_steady[i] / sigma_pos_y) ** 2
+        reward_i = np.exp(-0.5 * err_sq)
+        R_p_sum += min(reward_i, l_r)
+    R_p           = R_p_sum / T
+    position_term = w1 * R_p
 
-    mech_power  = np.sum(np.abs(torques_steady * qdot_steady)) * dt
+    w2          = 0.4
+    delta_t     = 0.02
+    mech_power  = np.sum(np.abs(torques_steady * qdot_steady)) * delta_t
     d           = bpos_steady[-1, 1] - bpos_steady[0, 1]
     CoT_cap     = 200.0 if d < 0.5 else (150.0 if d < 1.5 else 100.0)
-    CoT         = min(mech_power / (robot_mass * g * max(abs(d), 0.001)), CoT_cap)
+    CoT         = (mech_power / (robot_mass * g * max(d, 0.001))
+                   if d < 0.005
+                   else mech_power / (robot_mass * g * d))
+    CoT         = min(CoT, CoT_cap)
+    CoT_norm    = CoT / 50.0
 
-    J = velocity_term - w2 * CoT
+    w3        = 0.02
+    stability = trial_data["stability"]
+
+    J = position_term - w2 * CoT_norm - w3 * stability
     return J
 
 
@@ -1114,16 +918,10 @@ def compute_objective(trial_data: dict,
 # EVALUATE_CANDIDATE
 # =============================================================================
 
-def evaluate_candidate(params_np, target_velocity, robot_mass,
-                       optimizer_name, seed, trial_idx, agent=None,
-                       update_every=0, ramp_steps=20,
-                       debug=False, debug_save_prefix=None):
+def evaluate_candidate(params_np, target_forward_position, robot_mass,
+                       optimizer_name, seed, trial_idx, agent=None):
     """Evaluate one MARXEFE episode and return (J, metrics_dict).
     params_np is unused (agent drives action selection internally).
-    ``target_velocity`` is the forward speed set-point v*_x [m/s] tracked by the
-    objective (and matched to the agent's goal prior).
-    If debug=True, posterior/predictive traces are recorded and — when
-    debug_save_prefix is set — a debug figure is written.
     """
     sim_start = time.time()
     if agent is None:
@@ -1133,15 +931,11 @@ def evaluate_candidate(params_np, target_velocity, robot_mass,
         agent, quadruped, joint_IDs_full, filtered_joint_IDs, feet_joint_IDs,
         dt=0.01, episode_length=4.5,
         lambda_energy=1e-2,
-        update_every=update_every, ramp_steps=ramp_steps,
-        debug=debug,
+        target_forward_position=target_forward_position
     )
     sim_time_sec = time.time() - sim_start
 
-    if debug and debug_save_prefix is not None:
-        plot_marxefe_debug(trial_data, debug_save_prefix)
-
-    J = compute_objective(trial_data, target_velocity, robot_mass)
+    J = compute_objective(trial_data, target_forward_position, robot_mass)
 
     forwarddistance = trial_data["forward_distance"]
     lateraldrift    = trial_data["lateral_drift"]
@@ -1182,217 +976,16 @@ def evaluate_candidate(params_np, target_velocity, robot_mass,
         "opttimesec":     opt_time_sec,
         "simtimesec":     sim_time_sec,
         "totaltimesec":   total_time_sec,
-        "gc":           params8d[0],
-        "gp":           params8d[1],
-        "omegaswing":   params8d[2],
-        "omegastance":  params8d[3],
-        "mu":           params8d[4],
-        "xofffront":    params8d[5],
-        "xoffhind":     params8d[6],
-        "sigmaN":       params8d[7],
+        "couplinggain":   params8d[0],
+        "wswing":         params8d[1],
+        "wstance":        params8d[2],
+        "FFAST":          params8d[3],
+        "STOPGAIN":       params8d[4],
+        "hipamplitude":   params8d[5],
+        "kneeamplitude":  params8d[6],
+        "b":              params8d[7],
     }
     return J, metrics
-
-
-# =============================================================================
-# ONLINE / CONTINUOUS-RUN HELPERS
-# Shared agent factory + a single long continuous run for the BO-vs-MARXEFE
-# adaptation comparison (no per-update resets; methods update at their own
-# cadence — BO every 4.5 s, MARX-EFE every 1 s — as in Zhang et al. 2024).
-# =============================================================================
-
-def build_marx_agent(target_velocity=1.0, control_prior_scale=0.15,
-                     goal_prior_std=(np.sqrt(0.5), np.sqrt(0.5),
-                                     np.deg2rad(45), np.deg2rad(45)),
-                     input_buffer=3, output_buffer=10, time_horizon=2,
-                     nu0=20.0, omega0_scale=1.0, lambda0_scale=1e-3,
-                     forgetting=1.0):
-    """Construct a MARX-EFE agent (Du=8, Dy=4) with the given buffers / horizon /
-    priors. Shared by the per-trial optimizer and the continuous online runner."""
-    Mu, My, Dy, Du = int(input_buffer) - 1, int(output_buffer), 4, 8
-    reg_dim = Dy * My + Du * (Mu + 1)
-    Omega0  = omega0_scale * np.diag(np.ones(Dy))
-    Lambda0 = lambda0_scale * np.diag(np.ones(reg_dim))
-    Mean0   = 1e-8 * rnd.randn(reg_dim, Dy)
-    mu_t    = 0.5 * (bounds_lower + bounds_upper)
-    sigma_t = control_prior_scale * (bounds_upper - bounds_lower) / (2.0 * n_sigma)
-    Upsilon0 = torch.diag(1.0 / (sigma_t ** 2)).numpy()
-    svx, svy, sp, sr = goal_prior_std
-    goal = multivariate_normal(np.array([target_velocity, 0.0, 0.0, 0.0]),
-                               np.diag([svx**2, svy**2, sp**2, sr**2]))
-    return MARXAgent(Mean0.copy(), Lambda0.copy(), Omega0.copy(), float(nu0),
-                     mu_t.numpy().copy(), Upsilon0.copy(), goal,
-                     Dy=Dy, Du=Du, delay_inp=Mu, delay_out=My,
-                     time_horizon=int(time_horizon), forgetting=forgetting)
-
-
-def _velocity_window_J(vx, vy, torques, qdot, fwd_dist, robot_mass,
-                       target_velocity, dt, g=9.81):
-    """Scalar windowed objective (velocity tracking minus cost-of-transport)
-    that online BO maximizes over each 4.5 s window."""
-    T = len(vx)
-    if T < 5:
-        return -50.0
-    err = ((np.asarray(vx) - target_velocity) ** 2 + np.asarray(vy) ** 2) / 0.05
-    R_v = float(np.mean(np.minimum(np.exp(-err), 0.85)))
-    mech = float(np.sum(np.abs(np.asarray(torques) * np.asarray(qdot))) * dt)
-    d = max(float(fwd_dist), 1e-3)
-    CoT = min(mech / (robot_mass * g * d), 200.0)
-    return 5.0 * R_v - 0.4 * (CoT / 50.0)
-
-
-def run_bo_online(robot, joint_IDs_full_arg, filtered_joint_IDs_arg,
-                  feet_joint_IDs_arg, dt, run_length, bo, target_velocity,
-                  robot_mass, window_steps=450, transition_steps=150, seed=0,
-                  bo_trust_radius=None, init_params=None,
-                  target_schedule=None, param_schedule=None,
-                  bo_factory=None, restart_steps=None):
-    """One continuous online run (no resets after the start). Every
-    `window_steps` (= 4.5 s) BO scores the just-finished window via velocity
-    tracking, appends (params, J) to its GP, and proposes the next CPG
-    parameters, smoothly interpolated over `transition_steps`. Uses the same CPG
-    dynamics/feedback as the MARX episode. Returns per-step logs.
-
-    `init_params` sets the starting (and, with `window_steps` larger than the
-    run, the held) parameters — set `window_steps` huge and `bo=None` to run a
-    FIXED-parameter bout (no adaptation).
-
-    Non-stationary (velocity-switch) extras:
-      * `target_schedule` : per-step array of target forward velocities; used by
-        the windowed objective so each window is scored against the current
-        target. Falls back to scalar `target_velocity` if None.
-      * `param_schedule`  : list of (step, params) for the non-adaptive methods —
-        at each listed step the gait is switched (ramped) to `params`. Used to
-        feed pre-computed per-segment grid optima ("redo grid after each switch")
-        or a single fixed gait. Ignored when `bo` is not None.
-      * `bo_factory`/`restart_steps` : for online BO, at each step in
-        `restart_steps` the GP is rebuilt fresh (bo = bo_factory()) so BO
-        re-optimizes from scratch for the new target — the BO analogue of
-        re-running grid search after a velocity switch.
-    Returns per-step logs."""
-    ori_default = [0.0, 0.5, 0.5, 0.0]
-    cpg = reset_simulation(p, robot, filtered_joint_IDs_arg, ori_default)
-    n_legs = 4
-    y_k, base_pos, base_orientation = extract_observation(p, robot, ori_default)
-
-    leg_names = ["FL", "FR", "RL", "RR"]
-    hip_joint_ids = [1, 5, 9, 13]; knee_joint_ids = [2, 6, 10, 14]
-
-    num_steps = int(run_length / dt)
-    lower, upper = bounds_lower.numpy(), bounds_upper.numpy()
-    mid = 0.5 * (lower + upper)            # sane starting gait (control-prior mean)
-    rng = np.random.default_rng(seed)
-    n_joints = 2 * n_legs
-
-    t_log = np.zeros(num_steps); vx_log = np.zeros(num_steps); vy_log = np.zeros(num_steps)
-    fy_log = np.zeros(num_steps); roll_log = np.zeros(num_steps); pitch_log = np.zeros(num_steps)
-    yaw_log = np.zeros(num_steps); tgt_log = np.zeros(num_steps)
-    torq = np.zeros((num_steps, n_joints)); qd = np.zeros((num_steps, n_joints))
-    params_log = np.zeros((num_steps, 8))
-
-    # Start at a sane walking gait (midpoint) rather than a random draw — in a
-    # no-reset continuous run a fatal random init would end the bout immediately.
-    # `init_params` overrides the start (e.g. a grid-search winner, or a fixed gait).
-    seg_target = (np.asarray(init_params, dtype=float).copy()
-                  if init_params is not None else mid.copy())
-    seg_start = seg_target.copy(); seg_anchor = 0; seg_ramp = transition_steps
-    applied = seg_target.copy()
-    win_start = 0; n_obs = 0
-
-    tsched = None if target_schedule is None else np.asarray(target_schedule, float)
-    def tgt(i):
-        return float(tsched[min(i, len(tsched) - 1)]) if tsched is not None else target_velocity
-    psched = dict((int(s), np.asarray(pp, float)) for s, pp in (param_schedule or []))
-    rsteps = set(int(s) for s in (restart_steps or []))
-
-    DEBOUNCE_THRESHOLD = 2
-    debounced = np.zeros(n_legs, dtype=int); cc = np.zeros(n_legs, dtype=int)
-    is_fallen = False; k = 0
-    for k in range(num_steps):
-        t_log[k] = k * dt
-        # Non-adaptive methods: switch to the scheduled (e.g. per-segment grid)
-        # gait at the listed steps, ramped over the transition window.
-        if k in psched:
-            seg_start = applied.copy(); seg_target = np.clip(psched[k], lower, upper)
-            seg_anchor = k; seg_ramp = transition_steps
-        # Online BO: rebuild the GP from scratch at a velocity switch so it
-        # re-optimizes for the new target (the BO analogue of re-running grid).
-        if k in rsteps and bo_factory is not None:
-            bo = bo_factory(); n_obs = 0; win_start = k
-        frac = min(1.0, (k - seg_anchor) / max(1, seg_ramp))
-        applied = np.clip(seg_start + frac * (seg_target - seg_start), lower, upper)
-        params_log[k] = applied; tgt_log[k] = tgt(k)
-        params_8d = applied
-
-        # Raw foot contacts for the CPG's STOP/FAST feedback
-        raw_contacts = np.array([
-            int(len(p.getContactPoints(bodyA=0, bodyB=robot,
-                                       linkIndexA=-1, linkIndexB=feet_joint_IDs_arg[j])) > 0)
-            for j in range(n_legs)
-        ])
-
-        # Joint-space CPG step → hip/knee targets
-        hip_angles, knee_angles = cpg.step(params_8d, raw_contacts, dt)
-        for j in range(n_legs):
-            ab, hp, kn = joint_IDs_full_arg[leg_names[j]]
-            p.setJointMotorControl2(robot, ab, p.POSITION_CONTROL, targetPosition=0.0, force=500)
-            p.setJointMotorControl2(robot, hp, p.POSITION_CONTROL, hip_angles[j])
-            p.setJointMotorControl2(robot, kn, p.POSITION_CONTROL, knee_angles[j])
-
-        terrain.apply_dynamic_friction(p, robot, base_pos[1])
-        p.stepSimulation()
-
-        idx = 0
-        for jh, jk in zip(hip_joint_ids, knee_joint_ids):
-            hs = p.getJointState(robot, jh); ks = p.getJointState(robot, jk)
-            torq[k, idx] = hs[3]; torq[k, idx + 1] = ks[3]
-            qd[k, idx] = hs[1]; qd[k, idx + 1] = ks[1]; idx += 2
-
-        y_k, base_pos, base_orientation = extract_observation(p, robot, ori_default)
-        vx_log[k] = y_k[0]; vy_log[k] = y_k[1]; pitch_log[k] = y_k[2]; roll_log[k] = y_k[3]
-        yaw_log[k] = p.getEulerFromQuaternion(base_orientation)[2]
-        fy_log[k] = base_pos[1]
-
-        is_fallen, _, _, _ = check_if_fallen(p, robot, base_pos, base_orientation, 0.3, 0.25)
-        if is_fallen:
-            break
-
-        if k > 0 and (k % window_steps == 0):
-            s0, s1 = win_start + transition_steps, k
-            if s1 > s0 + 5:
-                J = _velocity_window_J(vx_log[s0:s1], vy_log[s0:s1], torq[s0:s1],
-                                       qd[s0:s1], fy_log[s1 - 1] - fy_log[s0],
-                                       robot_mass, tgt(s1 - 1), dt)
-            else:
-                J = -50.0
-            bo._append(seg_target, J); n_obs += 1
-            if n_obs < bo.n_init:
-                # mild exploration around the sane gait (avoid fatal random probes)
-                nxt = mid + rng.uniform(-0.15, 0.15) * (upper - lower)
-            else:
-                model = bo.fit_model()
-                if bo_trust_radius is None:
-                    nxt = bo.from_unit(bo.suggest(model, bo.beta_schedule(n_obs)))
-                else:
-                    # TuRBO-style trust region: optimize the acquisition only in a
-                    # box of half-width `bo_trust_radius` (in unit space) around the
-                    # incumbent best, so each update can't jump far -> more caution.
-                    xb = bo.train_X_unit[int(bo.train_Y.argmax())].numpy()
-                    lo = np.clip(xb - bo_trust_radius, 0.0, 1.0)
-                    hi = np.clip(xb + bo_trust_radius, 0.0, 1.0)
-                    saved = bo.unit_bounds
-                    bo.unit_bounds = torch.tensor([lo, hi], dtype=torch.double)
-                    try:
-                        nxt = bo.from_unit(bo.suggest(model, bo.beta_schedule(n_obs)))
-                    finally:
-                        bo.unit_bounds = saved
-            seg_start = applied.copy(); seg_target = np.clip(nxt, lower, upper)
-            seg_anchor = k; seg_ramp = transition_steps; win_start = k
-
-    L = (k + 1) if is_fallen else num_steps
-    return {"t": t_log[:L], "vx": vx_log[:L], "vy": vy_log[:L], "fy": fy_log[:L],
-            "roll": roll_log[:L], "pitch": pitch_log[:L], "yaw": yaw_log[:L],
-            "params": params_log[:L], "target": tgt_log[:L], "fell": is_fallen}
 
 
 # =============================================================================
@@ -1402,30 +995,11 @@ def run_bo_online(robot, joint_IDs_full_arg, filtered_joint_IDs_arg,
 def marxefe_optimize_cpg(bounds: torch.Tensor,
                          target_forward_position: float,
                          robot_mass: float,
-                         debug_first_trial: bool = True,
                          n_trials: int = 200,
                          optimizer_name: str = "MARXEFE",
                          seed: int = 0,
-                         results_dir: str = "results",
-                         goal_prior_std=(0.5, 0.5, np.deg2rad(10), np.deg2rad(10)),
-                         control_prior_scale: float = 1.0,
-                         target_velocity: float = 1.0,
-                         update_every: int = 0,
-                         ramp_steps: int = 20,
-                         forgetting: float = 1.0,
-                         time_horizon: int = 2,
-                         input_buffer: int = 3,
-                         output_buffer: int = 10,
-                         nu0: float = 20.0,
-                         omega0_scale: float = 1.0,
-                         lambda0_scale: float = 1e-3,
-                         ) -> tuple:
-    """MARXEFE optimisation loop with BO-compatible CSV logging.
-
-    The agent's internal goal is a target *forward velocity* (m/s); the
-    evaluation objective J stays position-based (target_forward_position) so
-    all three methods are scored identically.
-    """
+                         results_dir: str = "results") -> tuple:
+    """MARXEFE optimisation loop with BO-compatible CSV logging."""
     global quadruped, joint_IDs_full, filtered_joint_IDs, feet_joint_IDs
 
     os.makedirs(results_dir, exist_ok=True)
@@ -1439,9 +1013,9 @@ def marxefe_optimize_cpg(bounds: torch.Tensor,
         "fell", "stabilityindex",
         "rmsrolldeg", "rmspitchdeg",
         "opttimesec", "simtimesec", "totaltimesec",
-        "gc", "gp", "omegaswing",
-        "omegastance", "mu",
-        "xofffront", "xoffhind", "sigmaN",
+        "couplinggain", "wswing", "wstance",
+        "FFAST", "STOPGAIN",
+        "hipamplitude", "kneeamplitude", "b",
     ]
 
     csv_file   = open(csv_path, 'w', newline='')
@@ -1459,34 +1033,33 @@ def marxefe_optimize_cpg(bounds: torch.Tensor,
         print(f"\n✅ Environment initialized with robot ID: {quadruped} (mass={robot_mass} kg)")
 
     # MARXEFE agent (internal objective unchanged)
-    # Buffers: ubuffer holds `input_buffer` input vectors (current + Mu past),
-    # ybuffer holds `output_buffer` past output vectors. Defaults: 3 inputs, 10
-    # outputs.
-    Mu  = int(input_buffer) - 1     # delay_inp -> ubuffer width = Mu+1 = input_buffer
-    My  = int(output_buffer)        # delay_out -> ybuffer width = output_buffer
-    Dy  = 4   # observation dim: vx, vy, pitch, roll
+    Mu  = 2
+    My  = 4
+    Dy  = 4   # observation dim: pos_x, pos_y, pitch, roll
     Du  = 8
-    len_horizon = int(time_horizon)   # EFE planning horizon (steps); default 2
+    len_horizon = 5
 
-    Nu0     = float(nu0)
-    Omega0  = omega0_scale * np.diag(np.ones(Dy))
+    Nu0     = 20.0
+    Omega0  = 1e0 * np.diag(np.ones(Dy))
     reg_dim = Dy * My + Du * (Mu + 1)
-    Lambda0 = lambda0_scale * np.diag(np.ones(reg_dim))
+    Lambda0 = 1e-3 * np.diag(np.ones(reg_dim))
     Mean0   = 1e-8 * rnd.randn(reg_dim, Dy)
 
     mu_t      = 0.5 * (bounds_lower + bounds_upper)
-    sigma_t   = control_prior_scale * (bounds_upper - bounds_lower) / (2.0 * n_sigma)
+    sigma_t   = (bounds_upper - bounds_lower) / (2.0 * n_sigma)
     upsilon_t = 1.0 / (sigma_t ** 2)
     Lambda_u  = torch.diag(upsilon_t)
     mu0       = mu_t.numpy()
     Upsilon0  = Lambda_u.numpy()
 
-    # Goal prior — 4D: [vx, vy, pitch, roll]. Target forward velocity vx*,
-    # zero lateral velocity, level attitude.
-    sigma_vx, sigma_vy, sigma_pitch, sigma_roll = goal_prior_std
-    m_star = np.array([target_velocity, 0.0, 0.0, 0.0])
-    v_star = np.diag([sigma_vx**2, sigma_vy**2, sigma_pitch**2, sigma_roll**2])
-    goal   = multivariate_normal(m_star, v_star)
+    # Goal prior — 4D: [pos_x, pos_y, pitch, roll]
+    m_star      = np.array([target_forward_position, 0.0, 0.0, 0.0])
+    sigma_pos_x = 1.0
+    sigma_pos_y = 0.1
+    sigma_pitch = np.deg2rad(5)
+    sigma_roll  = np.deg2rad(5)
+    v_star      = np.diag([sigma_pos_x**2, sigma_pos_y**2, sigma_pitch**2, sigma_roll**2])
+    goal        = multivariate_normal(m_star, v_star)
 
     agent = MARXAgent(
         coefficients_mean_matrix    = Mean0.copy(),
@@ -1496,25 +1069,20 @@ def marxefe_optimize_cpg(bounds: torch.Tensor,
         control_prior_mean          = mu0.copy(),
         control_prior_precision     = Upsilon0.copy(),
         goal_prior                  = goal,
-        Dy=Dy, Du=Du, delay_inp=Mu, delay_out=My, time_horizon=len_horizon,
-        forgetting=forgetting,
+        Dy=Dy, Du=Du, delay_inp=Mu, delay_out=My, time_horizon=len_horizon
     )
-
-    # Fresh interpolation state for this optimization run.
-    global _prev_params_marx
-    _prev_params_marx = None
 
     dtype        = torch.double
     train_X_orig = torch.empty(0, bounds.shape[1], dtype=dtype)
     train_Y      = torch.empty(0, 1, dtype=dtype)
 
-    param_names = ["gc", "gp", "omegaswing", "omegastance",
-                   "mu", "xofffront", "xoffhind", "sigmaN"]
+    param_names = ["couplinggain", "wswing", "wstance", "FFAST",
+                   "STOPGAIN", "hipamplitude", "kneeamplitude", "b"]
 
     print("\n" + "=" * 70)
     print("MARXEFE OPTIMIZATION OF CPG PARAMETERS (8D)")
     print("=" * 70)
-    print(f"  Target fwd vel  : {target_velocity} m/s  (agent goal AND objective J; lateral target = 0)")
+    print(f"  Target fwd pos  : {target_forward_position} m  (lateral target = 0)")
     print(f"  Robot mass      : {robot_mass} kg")
     print(f"  Total trials    : {n_trials}")
     print(f"  Optimizer       : {optimizer_name},  Seed: {seed}")
@@ -1523,37 +1091,26 @@ def marxefe_optimize_cpg(bounds: torch.Tensor,
     print(f"  Results CSV     : {csv_path}")
     print("=" * 70)
 
-    figures_dir = os.path.join(results_dir, "figures")
-    os.makedirs(figures_dir, exist_ok=True)
-
     for trial_idx in range(1, n_trials + 1):
         agent.reset_buffer()
 
-        is_debug_trial = debug_first_trial and trial_idx == 1
-        debug_prefix = (os.path.join(figures_dir, f"{optimizer_name}_debug_trial1")
-                        if is_debug_trial else None)
-
         J, metrics = evaluate_candidate(
             params_np               = None,
-            target_velocity         = target_velocity,
+            target_forward_position = target_forward_position,
             robot_mass              = robot_mass,
             optimizer_name          = optimizer_name,
             seed                    = seed,
             trial_idx               = trial_idx,
             agent                   = agent,
-            update_every            = update_every,
-            ramp_steps              = ramp_steps,
-            debug                   = is_debug_trial,
-            debug_save_prefix       = debug_prefix,
         )
 
         csv_writer.writerow(metrics)
         csv_file.flush()
 
         params8d = np.array([
-            metrics["gc"],          metrics["gp"],         metrics["omegaswing"],
-            metrics["omegastance"], metrics["mu"],
-            metrics["xofffront"],   metrics["xoffhind"],   metrics["sigmaN"],
+            metrics["couplinggain"], metrics["wswing"],   metrics["wstance"],
+            metrics["FFAST"],        metrics["STOPGAIN"],
+            metrics["hipamplitude"], metrics["kneeamplitude"], metrics["b"],
         ])
 
         x_torch      = torch.tensor(params8d, dtype=dtype)
@@ -1590,117 +1147,12 @@ def marxefe_optimize_cpg(bounds: torch.Tensor,
         print(f"  {name:16s} = {value:.4f}")
     print("=" * 70)
 
-    # Expose the trained agent so callers can run extra evaluation episodes
-    # (e.g. for transition-recovery analysis) without re-training.
-    global _last_agent
-    _last_agent = agent
-
     return train_X_orig, train_Y, best_params
 
 
 # =============================================================================
 # PLOTTING — mirrors BO Figures 1 / 2 / 3
 # =============================================================================
-
-def plot_marxefe_debug(trial_data: dict, save_prefix: str) -> None:
-    """Debug figure: posterior evolution + one-step predictive vs observation
-    + control trajectory, within a single trial. Requires debug=True run."""
-    required = ["t", "y_history", "preds_m", "preds_v", "u_history",
-                "post_M_norm", "post_L_logdet", "post_O_tr", "post_O_logdet",
-                "post_nu"]
-    missing = [k for k in required if k not in trial_data]
-    if missing:
-        print(f"[plot_marxefe_debug] trial_data missing {missing}; skipping.")
-        return
-
-    t   = trial_data["t"]
-    y   = trial_data["y_history"]       # (4, T)
-    mu  = trial_data["preds_m"]         # (4, T)
-    v   = trial_data["preds_v"]         # (4, T)
-    uh  = trial_data["u_history"]       # (8, T)
-    g   = trial_data.get("goals_m")     # (4, T) or None
-    std = np.sqrt(np.clip(v, 0, None))
-
-    trans = trial_data.get("transition_duration", None)
-
-    # Figure A: posterior summaries + predictive
-    fig, axes = plt.subplots(4, 2, figsize=(16, 14))
-    fig.suptitle("MARXEFE debug: posterior + posterior predictive (trial 1)",
-                 fontsize=14, fontweight='bold')
-
-    ax = axes[0, 0]
-    ax.plot(t, trial_data["post_M_norm"], color='C0')
-    ax.set(title=r"$\|M\|_F$ (AR coefficient posterior mean)",
-           xlabel="t [s]", ylabel=r"$\|M\|_F$")
-    ax.grid(alpha=0.3)
-
-    ax = axes[0, 1]
-    ax.plot(t, trial_data["post_nu"], color='C1')
-    ax.set(title=r"$\nu$ (precision df, should grow linearly)",
-           xlabel="t [s]", ylabel=r"$\nu$")
-    ax.grid(alpha=0.3)
-
-    ax = axes[1, 0]
-    ax.plot(t, trial_data["post_L_logdet"], color='C2')
-    ax.set(title=r"$\log|\Lambda|$ (regressor precision)",
-           xlabel="t [s]", ylabel=r"$\log|\Lambda|$")
-    ax.grid(alpha=0.3)
-
-    ax = axes[1, 1]
-    ax.plot(t, trial_data["post_O_logdet"], color='C3', label=r"$\log|\Omega|$")
-    ax2 = ax.twinx()
-    ax2.plot(t, trial_data["post_O_tr"], color='C4', alpha=0.7,
-             label=r"$\mathrm{tr}(\Omega)$")
-    ax.set(title=r"$\Omega$ (output precision scale)", xlabel="t [s]",
-           ylabel=r"$\log|\Omega|$")
-    ax2.set_ylabel(r"$\mathrm{tr}(\Omega)$")
-    ax.grid(alpha=0.3)
-    ax.legend(loc='upper left'); ax2.legend(loc='upper right')
-
-    obs_labels = ["pos_x (forward +Y) [m]", "pos_y (lateral X) [m]",
-                  "pitch [rad]", "roll [rad]"]
-    row_col = [(2, 0), (2, 1), (3, 0), (3, 1)]
-    for i, (r, c) in enumerate(row_col):
-        ax = axes[r, c]
-        ax.plot(t, y[i],  color='steelblue', lw=1.5, label="observation")
-        ax.plot(t, mu[i], color='crimson', lw=1.2, ls='--', label=r"pred $\mu_t$")
-        ax.fill_between(t, mu[i] - 2 * std[i], mu[i] + 2 * std[i],
-                        color='crimson', alpha=0.15, label=r"pred $\pm 2\sigma$")
-        if g is not None:
-            ax.plot(t, g[i], color='green', ls=':', lw=1, label="goal mean")
-        if trans is not None:
-            ax.axvline(trans, color='gray', ls=':', alpha=0.7)
-        ax.set(title=obs_labels[i], xlabel="t [s]")
-        ax.grid(alpha=0.3)
-        ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    outA = f"{save_prefix}_posterior_and_predictive.png"
-    fig.savefig(outA, dpi=150)
-    plt.close(fig)
-    print(f"✅ Saved {outA}")
-
-    # Figure B: control trajectory (8D CPG params over time)
-    param_labels = ["g_c (clearance)", "g_p (penetration)", "omega_swing", "omega_stance",
-                    "mu (amplitude)", "x_off_front", "x_off_hind", "sigma_N (Tegotae)"]
-    fig2, axes2 = plt.subplots(4, 2, figsize=(16, 11))
-    fig2.suptitle("MARXEFE debug: CPG parameter trajectory within trial 1",
-                  fontsize=14, fontweight='bold')
-    for i, lbl in enumerate(param_labels):
-        ax = axes2.flat[i]
-        ax.plot(t, uh[i], color='C0', lw=1.3)
-        ax.axhline(bounds_lower[i].item(), color='gray', ls=':', lw=1, alpha=0.6)
-        ax.axhline(bounds_upper[i].item(), color='gray', ls=':', lw=1, alpha=0.6)
-        if trans is not None:
-            ax.axvline(trans, color='gray', ls=':', alpha=0.7)
-        ax.set(title=lbl, xlabel="t [s]", ylabel=lbl)
-        ax.grid(alpha=0.3)
-    plt.tight_layout()
-    outB = f"{save_prefix}_controls.png"
-    fig2.savefig(outB, dpi=150)
-    plt.close(fig2)
-    print(f"✅ Saved {outB}")
-
 
 def plot_marxefe_results(csv_path: str,
                          target_forward_position: float = 4.0,
@@ -1730,8 +1182,8 @@ def plot_marxefe_results(csv_path: str,
     stabilities       = _f("stabilityindex")
     fall_flags        = _f("fell")
 
-    param_names  = ["gc", "gp", "omegaswing", "omegastance",
-                    "mu", "xofffront", "xoffhind", "sigmaN"]
+    param_names  = ["couplinggain", "wswing", "wstance", "FFAST",
+                    "STOPGAIN", "hipamplitude", "kneeamplitude", "b"]
     param_arrays = [_f(n) for n in param_names]
 
     cumulative_falls = np.cumsum(fall_flags)
@@ -1792,8 +1244,9 @@ def plot_marxefe_results(csv_path: str,
     print(f"✅ Saved {out1}")
 
     # Figure 2
-    param_labels = ["g_c (clearance)", "g_p (penetration)", "omega_swing", "omega_stance",
-                    "mu (amplitude)", "x_off_front", "x_off_hind", "sigma_N (Tegotae)"]
+    param_labels = ["Coupling Gain", "ω_swing", "ω_stance", "F_FAST",
+                    "STOP_GAIN", "Hip Amplitude", "Knee Amplitude",
+                    "b (Sharpness)"]
     fig2, axes2 = plt.subplots(3, 3, figsize=(16, 10))
     fig2.suptitle('MARXEFE CPG Parameter Evolution', fontsize=14, fontweight='bold')
 
