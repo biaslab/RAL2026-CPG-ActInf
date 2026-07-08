@@ -1,0 +1,49 @@
+{
+  "trigger": "dt",
+  "slopes": [
+    10.0
+  ],
+  "seeds": 1,
+  "arms": [
+    "noadapt",
+    "oracle",
+    "grid",
+    "bo",
+    "marxefe"
+  ],
+  "k_sigma": 1.0,
+  "dt_move": 0.02,
+  "tau": 2.2755555555555556,
+  "control_prior_scale": 0.15,
+  "slope_start_y": 5.0,
+  "dt": 0.01,
+  "window": 150,
+  "ramp": 30,
+  "adapt_t": 20.0,
+  "duration": 40.0,
+  "target_vx": 0.5,
+  "mon_std_deg": {
+    "pitch": 20.0,
+    "roll": 6.0
+  },
+  "incumbent": [
+    9.3567,
+    10.0,
+    23.7197,
+    50.7873,
+    0.5,
+    0.1,
+    0.5,
+    2.5203
+  ],
+  "oracle": [
+    12.0,
+    25.0,
+    25.0,
+    60.0,
+    0.1882,
+    0.1,
+    0.5,
+    10.0
+  ]
+}

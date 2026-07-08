@@ -91,6 +91,19 @@ MON_PITCH_DEG = 20.0      # goal-prior std on pitch [deg] (tolerates slope offse
 MON_ROLL_DEG = 6.0        # goal-prior std on roll [deg] (lateral stability: tight)
 K_DEFAULT = 2.0           # trigger threshold on the baseline-normalised ratio
 
+# ── Decision-theoretic (optimality-based) trigger ────────────────────────────
+# With the control cost off and the info-gain flat (identified model), the EFE at
+# the incumbent is the goal cross-entropy, so triggering tests whether the CPG
+# params are still at its minimum. The first-order statistic is the Newton
+# decrement lambda^2 = g' H^+ g (g,H = grad/Hessian of the goal term w.r.t. u via
+# the model's steady-state control gain). The decision-theoretic threshold fires
+# when half*lambda^2 exceeds the control-prior cost of a reference gait move, i.e.
+# lambda^2 > tau, tau = Du*(4*MOVE/CONTROL_PRIOR_SCALE)^2. Its ratio-to-tau plays
+# the exact role the CE ratio-to-baseline plays, so the squash logic is unchanged
+# (with the effective threshold = 1.0).
+CONTROL_PRIOR_SCALE = 0.15   # monitor control-prior width (price of adapting)
+DT_BUDGET_MOVE = 0.02        # reference gait move (fraction of each param's range)
+
 ARMS_DEFAULT = ["noadapt", "oracle", "grid", "bo", "marxefe"]
 
 
@@ -231,6 +244,108 @@ class TriggerMonitor:
         if k < b1:
             return 0.0
         return float(self.ema_log[k] / self._baseline_mean())
+
+
+def _dc_gain(agent):
+    """Steady-state (DC) control gain B = (I - sum A_l)^-1 (sum B_c) of the learned
+    ARX model, from the posterior mean M (columns follow the x layout
+    [u-buffer | y-buffer]). The sustained effect of holding a new CPG parameter --
+    the control authority relevant to adaptation, unlike the tiny one-step gain."""
+    MT = agent.M.T
+    Du, Dy = agent.Du, agent.Dy
+    Wu, Wy = agent.ubuffer.shape[1], agent.ybuffer.shape[1]
+    y_off = Du * Wu
+    G_u = np.column_stack([MT[:, d*Wu:d*Wu+Wu].sum(1) for d in range(Du)])
+    A = np.column_stack([MT[:, y_off+e*Wy:y_off+e*Wy+Wy].sum(1) for e in range(Dy)])
+    return np.linalg.solve(np.eye(Dy) - A, G_u)
+
+
+class DecisionTheoreticMonitor:
+    """Optimality-based trigger. Same public interface as TriggerMonitor, but the
+    statistic is the Newton decrement lambda^2 (recoverable goal cross-entropy at
+    the incumbent controls) rather than the CE value, and the "baseline" it is
+    normalised by is a fixed control-cost budget tau (not an empirical flat
+    window). So `ratio_trace`/`current_ratio` return lambda^2 / tau and the
+    trigger/squash logic fires/pauses against an effective threshold of 1.0."""
+
+    REARM_FRAC = 0.5
+    PERSIST_STEPS = 2
+
+    def __init__(self, n_steps, k_sigma, dt_move=None, control_prior_scale=None):
+        from methods.marxefe_optimizer import build_marx_agent
+        move = DT_BUDGET_MOVE if dt_move is None else float(dt_move)
+        cps = CONTROL_PRIOR_SCALE if control_prior_scale is None else float(control_prior_scale)
+        np.random.seed(0)
+        self.agent = build_marx_agent(
+            target_velocity=TARGET_VX, control_prior_scale=cps,
+            goal_prior_std=(MON_VEL_STD, MON_VEL_STD,
+                            np.deg2rad(MON_PITCH_DEG), np.deg2rad(MON_ROLL_DEG)),
+            forgetting=0.995)
+        self.Du = self.agent.Du
+        self.tau = self.Du * (4.0 * move / cps) ** 2      # control-cost budget
+        self.k_sigma = float(k_sigma)                     # threshold on lambda^2/tau (=1.0)
+        self.c_log = np.zeros(n_steps)                    # raw lambda^2
+        self.ema_log = np.zeros(n_steps)                  # EMA lambda^2
+        self.ctrl_log = np.zeros(n_steps)                 # model's Newton-step cost
+        self.ema = 0.0
+        self.fired = False
+        self.fire_step = None
+        self.fire_steps = []
+        self.armed = True
+        self.above = 0
+        self._Sinv = np.linalg.inv(np.asarray(self.agent.goal_prior.cov, float))
+        self._mstar = np.asarray(self.agent.goal_prior.mean, float)
+        self._Ups = np.asarray(self.agent.Υ, float)
+
+    def _lambda2(self, applied):
+        ubuf = self.agent.backshift(self.agent.ubuffer, applied)
+        x = np.concatenate([ubuf.flatten(), self.agent.ybuffer.flatten()])
+        _, mu, _ = self.agent.posterior_predictive(x)
+        err = mu - self._mstar
+        B = _dc_gain(self.agent)
+        g = B.T @ self._Sinv @ err
+        H = B.T @ self._Sinv @ B
+        Hp = np.linalg.pinv(H, rcond=1e-8)
+        lam2 = float(g @ (Hp @ g))
+        du = -Hp @ g
+        ctrl = float(du @ (self._Ups @ du))
+        return lam2, ctrl
+
+    def step(self, k, t, y_new, applied):
+        lam2, ctrl = 0.0, 0.0
+        if self.agent.n_updates > WARMUP_UPDATES:
+            try:
+                lam2, ctrl = self._lambda2(applied)
+            except Exception:
+                lam2, ctrl = 0.0, 0.0
+        self.agent.update(y_new, applied)
+        self.ema = lam2 if k == 0 else (1 - EMA_ALPHA) * self.ema + EMA_ALPHA * lam2
+        self.c_log[k] = lam2
+        self.ema_log[k] = self.ema
+        self.ctrl_log[k] = ctrl
+
+        if t >= ARM_TIME:
+            ratio = self.ema / self.tau
+            self.above = self.above + 1 if ratio > self.k_sigma else 0
+            if self.armed and self.above >= self.PERSIST_STEPS:
+                self.fire_steps.append(k)
+                self.armed = False
+                if not self.fired:
+                    self.fired = True
+                    self.fire_step = k
+            elif not self.armed and ratio < self.REARM_FRAC * self.k_sigma:
+                self.armed = True
+                self.above = 0
+        return self.fired
+
+    def _baseline_mean(self):
+        return self.tau                       # fixed control-cost budget
+
+    def ratio_trace(self):
+        return self.ema_log / self.tau
+
+    def current_ratio(self, k):
+        return float(self.ema_log[k] / self.tau)
 
 
 # ── Online adaptation methods ────────────────────────────────────────────────
@@ -433,9 +548,12 @@ def _reset_with_jitter(p, robot, seed):
     return JointCPG(n_legs=4)
 
 
-def run_trial(seed, slope_deg, method_name, k_sigma, incumbent, oracle_params, box):
+def run_trial(seed, slope_deg, method_name, k_sigma, incumbent, oracle_params, box,
+              trigger="ce"):
     """One episode: flat prefix -> trigger -> squash-gated online adaptation.
-    Logs the full per-step signals and returns them for NPZ dumping."""
+    Logs the full per-step signals and returns them for NPZ dumping. `trigger`
+    selects the monitor: "ce" (empirical goal cross-entropy ratio) or "dt"
+    (decision-theoretic Newton-decrement lambda^2 vs a control-cost budget)."""
     import pybullet as p
     from methods import terrain
     from methods.marxefe_optimizer import (get_base_orientation,
@@ -448,7 +566,8 @@ def run_trial(seed, slope_deg, method_name, k_sigma, incumbent, oracle_params, b
     cpg = _reset_with_jitter(p, robot, seed)
 
     n_steps = int(round(DURATION / DT))
-    monitor = TriggerMonitor(n_steps, k_sigma)
+    Monitor = DecisionTheoreticMonitor if trigger == "dt" else TriggerMonitor
+    monitor = Monitor(n_steps, k_sigma)
     method = METHODS[method_name](np.asarray(incumbent, float),
                                   np.asarray(oracle_params, float), box, seed)
 
@@ -598,6 +717,8 @@ def run_trial(seed, slope_deg, method_name, k_sigma, incumbent, oracle_params, b
         clear=log["clear"], applied=applied_log, adapting=adapting_log,
         ce_raw=monitor.c_log[:n], ce_ema=monitor.ema_log[:n],
         ratio=monitor.ratio_trace()[:n],
+        dt_ctrl=(monitor.ctrl_log[:n] if trigger == "dt" else np.zeros(n)),
+        trigger_kind=trigger,
         # events / summaries
         window_scores=np.asarray(window_scores, float),
         selected_params=np.asarray(selected_params, float) if selected_params
@@ -660,34 +781,52 @@ def scalar_metrics(res):
     return d
 
 
-def run_path(slope_deg, seed, method):
-    return os.path.join(RUNS_DIR, f"slope{slope_deg:g}_seed{seed}_{method}.npz")
+def run_path(slope_deg, seed, method, trigger="ce"):
+    suffix = "" if trigger == "ce" else f"_{trigger}"
+    return os.path.join(RUNS_DIR, f"slope{slope_deg:g}_seed{seed}_{method}{suffix}.npz")
 
 
 # ── Job / harness ────────────────────────────────────────────────────────────
 
 def _job(args):
     _limit_threads()
-    slope_deg, seed, method, k_sigma, incumbent, oracle = args
+    slope_deg, seed, method, k_sigma, incumbent, oracle, trigger, dt_move = args
+    global DT_BUDGET_MOVE
+    DT_BUDGET_MOVE = float(dt_move)          # picked up by DecisionTheoreticMonitor
     from methods.cpg_bounds import bounds_lower as bl, bounds_upper as bu
     box = (bl.numpy(), bu.numpy())
-    res = run_trial(seed, slope_deg, method, k_sigma, incumbent, oracle, box)
-    path = run_path(slope_deg, seed, method)
+    res = run_trial(seed, slope_deg, method, k_sigma, incumbent, oracle, box,
+                    trigger=trigger)
+    path = run_path(slope_deg, seed, method, trigger)
     np.savez_compressed(path, **res)
     row = scalar_metrics(res)
+    row["trigger"] = trigger
     row["npz"] = os.path.relpath(path, RESULTS_DIR)
     return row
 
 
-def run(slopes, seeds, arms, k_sigma, workers):
+def run(slopes, seeds, arms, k_sigma, workers, trigger="ce", dt_move=DT_BUDGET_MOVE):
     os.makedirs(RUNS_DIR, exist_ok=True)
     incumbent, oracle = load_optima()
+    # DT normalises lambda^2 by the control-cost budget tau, so its threshold on
+    # the returned ratio is 1.0 (K is only the CE-ratio threshold).
+    k_eff = 1.0 if trigger == "dt" else float(k_sigma)
+    tau = 8 * (4.0 * dt_move / CONTROL_PRIOR_SCALE) ** 2
+    suffix = "" if trigger == "ce" else f"_{trigger}"
+    manifest = MANIFEST_CSV if trigger == "ce" else os.path.join(
+        RESULTS_DIR, f"manifest{suffix}.csv")
+    config = CONFIG_JSON if trigger == "ce" else os.path.join(
+        RESULTS_DIR, f"config{suffix}.json")
+
     print(f"flat-optimal (incumbent): {np.round(incumbent, 3).tolist()}")
     print(f"slope-optimal (oracle)  : {np.round(oracle, 3).tolist()}")
-    print(f"slopes={slopes} seeds={seeds} arms={arms} K={k_sigma}")
+    print(f"trigger={trigger}  slopes={slopes} seeds={seeds} arms={arms} "
+          f"threshold={k_eff}" + (f"  tau={tau:.3f} (move={dt_move})" if trigger == "dt" else ""))
 
-    with open(CONFIG_JSON, "w") as f:
-        json.dump(dict(slopes=slopes, seeds=seeds, arms=arms, k_sigma=k_sigma,
+    with open(config, "w") as f:
+        json.dump(dict(trigger=trigger, slopes=slopes, seeds=seeds, arms=arms,
+                       k_sigma=k_eff, dt_move=dt_move, tau=tau,
+                       control_prior_scale=CONTROL_PRIOR_SCALE,
                        slope_start_y=SLOPE_START_Y, dt=DT, window=WINDOW,
                        ramp=RAMP, adapt_t=ADAPT_T, duration=DURATION,
                        target_vx=TARGET_VX,
@@ -695,7 +834,7 @@ def run(slopes, seeds, arms, k_sigma, workers):
                        incumbent=incumbent.tolist(), oracle=oracle.tolist()),
                   f, indent=2)
 
-    jobs = [(float(sl), int(s), m, float(k_sigma), incumbent, oracle)
+    jobs = [(float(sl), int(s), m, k_eff, incumbent, oracle, trigger, dt_move)
             for sl in slopes for s in range(seeds) for m in arms]
     ctx = get_context("spawn")
     rows = []
@@ -710,16 +849,16 @@ def run(slopes, seeds, arms, k_sigma, workers):
                   f"meanJ={row.get('mean_J', float('nan')):.2f}", flush=True)
 
     rows.sort(key=lambda r: (r["slope_deg"], r["seed"], r["method"]))
-    cols = ["slope_deg", "seed", "method", "triggered", "fell", "trigger_t",
-            "fall_t", "squash_t", "t_surv", "n_windows", "mean_J", "best_J",
-            "win_to_good", "n_proposals", "n_pauses", "n_triggers", "max_roll",
-            "dist_on_slope", "baseline_ce", "npz"]
-    with open(MANIFEST_CSV, "w", newline="") as f:
+    cols = ["slope_deg", "seed", "method", "trigger", "triggered", "fell",
+            "trigger_t", "fall_t", "squash_t", "t_surv", "n_windows", "mean_J",
+            "best_J", "win_to_good", "n_proposals", "n_pauses", "n_triggers",
+            "max_roll", "dist_on_slope", "baseline_ce", "npz"]
+    with open(manifest, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         for r in rows:
             w.writerow({c: r.get(c, "") for c in cols})
-    print(f"\nsaved {MANIFEST_CSV}  ({len(rows)} runs) and per-run NPZ in {RUNS_DIR}")
+    print(f"\nsaved {manifest}  ({len(rows)} runs) and per-run NPZ in {RUNS_DIR}")
 
 
 def main():
@@ -732,10 +871,17 @@ def main():
     ap.add_argument("--arms", nargs="+", default=ARMS_DEFAULT,
                     choices=list(METHODS.keys()))
     ap.add_argument("--K", type=float, default=K_DEFAULT,
-                    help="trigger threshold on the baseline-normalised ratio")
+                    help="CE trigger threshold on the baseline-normalised ratio")
+    ap.add_argument("--trigger", choices=["ce", "dt"], default="ce",
+                    help="ce: goal cross-entropy ratio; dt: decision-theoretic "
+                         "Newton-decrement lambda^2 vs a control-cost budget")
+    ap.add_argument("--dt-move", type=float, default=DT_BUDGET_MOVE,
+                    help="dt only: reference gait move (fraction of param range) "
+                         "whose control cost sets the threshold tau")
     ap.add_argument("--workers", type=int, default=8)
     args = ap.parse_args()
-    run(args.slopes, args.seeds, args.arms, args.K, args.workers)
+    run(args.slopes, args.seeds, args.arms, args.K, args.workers,
+        trigger=args.trigger, dt_move=args.dt_move)
 
 
 if __name__ == "__main__":
