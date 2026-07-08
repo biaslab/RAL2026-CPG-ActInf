@@ -78,8 +78,25 @@ def score_V(log, score_from_y=None):
 
 # ── Stage 1: per-seed BO ─────────────────────────────────────────────────────
 
+def _limit_threads():
+    """Pin BLAS/torch to a single thread per worker. With N worker processes,
+    the default multi-threaded BLAS/torch would spawn N x (cores) threads and
+    thrash the CPU (~5x slowdown observed); one thread per worker lets N workers
+    use N cores cleanly."""
+    import os
+    for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+              "NUMEXPR_NUM_THREADS"):
+        os.environ[v] = "1"
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
 def _bo_job(job):
     """One optimization seed: BO with 30-s episode evaluations on `cfg`."""
+    _limit_threads()
     cfg, score_from_y, seed, n_trials = job
     import torch
     from methods.bo_optimizer import BOOptimizer, BetaSchedule
@@ -139,6 +156,7 @@ def run_oracle(terrain_name, cfg, score_from_y, results_dir, seeds, trials, work
 # ── Stage 2: pre-select the reference optimum ────────────────────────────────
 
 def _select_job(job):
+    _limit_threads()
     cfg, score_from_y, cand_id, params, rep = job
     log = run_episode(dict(cfg), seed=5000 + rep,
                       params_start=np.asarray(params, float), duration=EPISODE_T)

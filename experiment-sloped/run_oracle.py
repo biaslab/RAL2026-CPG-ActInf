@@ -35,8 +35,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("stage", nargs="?", default="all",
                     choices=["run", "select", "all"])
-    ap.add_argument("--seeds", type=int, default=50)
-    ap.add_argument("--trials", type=int, default=100)
+    ap.add_argument("--seeds", type=int, default=10)
+    ap.add_argument("--trials", type=int, default=60)
     ap.add_argument("--top", type=int, default=5)
     ap.add_argument("--reps", type=int, default=8)
     ap.add_argument("--workers", type=int, default=10)

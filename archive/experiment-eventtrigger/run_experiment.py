@@ -279,6 +279,7 @@ class TriggerMonitor:
     event (starts adaptation); ``fire_steps`` records every event."""
 
     REARM_FRAC = 0.5
+    PERSIST_STEPS = 2         # consecutive steps above threshold before firing
 
     def __init__(self, n_steps, k_sigma):
         from methods.marxefe_optimizer import build_marx_agent
@@ -295,6 +296,7 @@ class TriggerMonitor:
         self.fire_step = None
         self.fire_steps = []
         self.armed = True
+        self.above = 0           # consecutive steps the statistic is above K
 
     def step(self, k, t, y_new, applied):
         # Goal cross-entropy of the one-step posterior predictive p(y_k | u_k,
@@ -313,34 +315,37 @@ class TriggerMonitor:
         self.ema_log[k] = self.ema
 
         if t >= ARM_TIME:
-            b0, b1 = int(BASELINE_T[0] / DT), int(BASELINE_T[1] / DT)
-            mu = self.ema_log[b0:b1].mean()
-            sd = self.ema_log[b0:b1].std()
-            thr = mu + self.k_sigma * sd
-            if self.armed and self.ema > thr:
+            # Threshold is a MULTIPLE of the flat baseline MEAN (not mean+K*sd):
+            # flat walking is razor-consistent (tiny sd), so a z-score explodes
+            # for any slope walking; the ratio ema/baseline_mean is well-scaled
+            # (flat ~1, stable slope ~3, falling ~12, transition spike ~40).
+            thr = self.k_sigma * self._baseline_mean()
+            self.above = self.above + 1 if self.ema > thr else 0
+            if self.armed and self.above >= self.PERSIST_STEPS:
                 self.fire_steps.append(k)
                 self.armed = False
                 if not self.fired:
                     self.fired = True
                     self.fire_step = k
-            elif not self.armed and self.ema < mu + self.REARM_FRAC * self.k_sigma * sd:
+            elif not self.armed and self.ema < self.REARM_FRAC * thr:
                 self.armed = True
+                self.above = 0
         return self.fired
 
-    def zscore_trace(self):
+    def _baseline_mean(self):
         b0, b1 = int(BASELINE_T[0] / DT), int(BASELINE_T[1] / DT)
-        mu = self.ema_log[b0:b1].mean()
-        sd = max(self.ema_log[b0:b1].std(), 1e-12)
-        return (self.ema_log - mu) / sd
+        return max(self.ema_log[b0:b1].mean(), 1e-9)
 
-    def current_z(self, k):
-        """The trigger statistic at step k: EMA error in baseline z-units."""
+    def ratio_trace(self):
+        """Trigger statistic over time: EMA goal cross-entropy / baseline mean."""
+        return self.ema_log / self._baseline_mean()
+
+    def current_ratio(self, k):
+        """Trigger statistic at step k: EMA / baseline mean."""
         b0, b1 = int(BASELINE_T[0] / DT), int(BASELINE_T[1] / DT)
         if k < b1:
             return 0.0
-        mu = self.ema_log[b0:b1].mean()
-        sd = max(self.ema_log[b0:b1].std(), 1e-12)
-        return float((self.ema_log[k] - mu) / sd)
+        return float(self.ema_log[k] / self._baseline_mean())
 
 
 # ── Online adaptation methods ────────────────────────────────────────────────
@@ -456,11 +461,12 @@ class MarxEFE(NoAdapt):
                      active inference; False = greedy-MAP predictive selector).
       PRIOR_CENTER — control-prior mean: "incumbent" (prefer the current gait)
                      or "mid" (mid-bounds, no preference for staying put).
-      ATT_STD_DEG  — goal-prior std on pitch/roll (degrees). The default 45°
-                     leaves attitude loose, so the EFE goal effectively only
-                     tracks velocity; the *_stable subclasses tighten it so the
-                     goal matches the stability criterion V that θ*(e) optimizes
-                     (M4 objective alignment).
+      PITCH_STD_DEG / ROLL_STD_DEG — per-channel goal-prior std (physical
+                     convention: pitch = forward tilt, roll = lateral bank). The
+                     default 45°/45° leaves attitude loose (EFE effectively tracks
+                     velocity); the *_stable subclasses align to the monitor's
+                     world-frame stability goal (pitch loose so the incline tilt
+                     is tolerated, roll tight for lateral stability).
       CONTROL_PRIOR_SCALE — width of the control prior around the incumbent
                      (0.15 tight = strong preference to stay; larger loosens it,
                      allowing bigger per-window corrections)."""
@@ -469,16 +475,17 @@ class MarxEFE(NoAdapt):
     FORGETTING = 0.995
     EPISTEMIC = True
     PRIOR_CENTER = "incumbent"
-    ATT_STD_DEG = 45.0
-    CONTROL_PRIOR_SCALE = 0.15
     VEL_STD = np.sqrt(0.5)
+    PITCH_STD_DEG = 45.0
+    ROLL_STD_DEG = 45.0
+    CONTROL_PRIOR_SCALE = 0.15
 
     def __init__(self, incumbent, oracle_params, box, seed):
         from methods.marxefe_optimizer import build_marx_agent
         from methods.cpg_bounds import bounds_lower, bounds_upper
         np.random.seed(1)
         goal_std = (self.VEL_STD, self.VEL_STD,
-                    np.deg2rad(self.ATT_STD_DEG), np.deg2rad(self.ATT_STD_DEG))
+                    np.deg2rad(self.PITCH_STD_DEG), np.deg2rad(self.ROLL_STD_DEG))
         self.agent = build_marx_agent(
             target_velocity=TARGET_VX,
             control_prior_scale=self.CONTROL_PRIOR_SCALE,
@@ -545,14 +552,14 @@ class MarxEFENoSafeguard(MarxEFE):
 
 
 class MarxEFEStable(MarxEFE):
-    """M4 objective alignment: tighten the attitude (pitch/roll) goal-prior std
-    from 45° to 8° so the EFE goal actually rewards staying upright — matching
-    the stability criterion V that θ*(e) optimizes, rather than only tracking
-    velocity. Tests whether a stability-aligned goal makes MARX-EFE adapt θ
-    toward θ*(10°) instead of holding the incumbent. Run at a trust region wide
-    enough for θ*(10°) to be reachable."""
+    """World-frame stability goal, aligned to the trigger monitor (physical
+    convention): the agent minimizes the same quantity the monitor measures.
+    Pitch (forward) is loose so the incline tilt is tolerated; roll (lateral) is
+    tight; velocity is loose ("first stability, then speed")."""
     name = "marxefe_stable"
-    ATT_STD_DEG = 8.0
+    VEL_STD = MON_VEL_STD
+    PITCH_STD_DEG = MON_PITCH_DEG
+    ROLL_STD_DEG = MON_ROLL_DEG
 
 
 class MarxEFEStableGreedy(MarxEFEStable):
@@ -561,28 +568,11 @@ class MarxEFEStableGreedy(MarxEFEStable):
     name = "marxefe_stable_greedy"
     EPISTEMIC = False
 
-
-def _make_sweep_arm(att_deg, cps):
-    """Build a stability-aligned MARX-EFE arm class with attitude goal-prior std
-    `att_deg` (degrees) and control-prior width `cps`. Named mxs_a<att>_c<cps%>
-    so the goal-prior sweep runs as ordinary arms sharing the paired prefix."""
-    tag = f"mxs_a{int(round(att_deg))}_c{int(round(cps * 100))}"
-    return type(tag, (MarxEFEStable,),
-               {"name": tag, "ATT_STD_DEG": float(att_deg),
-                "CONTROL_PRIOR_SCALE": float(cps)})
-
-
-# Goal-prior sweep: attitude std (deg) x control-prior width. Does any setting
-# generalize the stability-aligned gain to repeated transitions?
-SWEEP_ATT_DEG = (4.0, 8.0, 16.0)
-SWEEP_CPS = (0.15, 0.5)
-SWEEP_ARMS = [_make_sweep_arm(a, c) for a in SWEEP_ATT_DEG for c in SWEEP_CPS]
-
-METHODS = {c.name: c for c in ([NoAdapt, Oracle, GridSearchOnline,
-                                BOOnline, MarxEFE, MarxEFEGreedy,
-                                MarxEFENoForget, MarxEFEMidPrior,
-                                MarxEFENoSafeguard, MarxEFEStable,
-                                MarxEFEStableGreedy] + SWEEP_ARMS)}
+METHODS = {c.name: c for c in (NoAdapt, Oracle, GridSearchOnline,
+                               BOOnline, MarxEFE, MarxEFEGreedy,
+                               MarxEFENoForget, MarxEFEMidPrior,
+                               MarxEFENoSafeguard, MarxEFEStable,
+                               MarxEFEStableGreedy)}
 
 
 class Safeguard:
@@ -731,10 +721,10 @@ def run_trial(seed, slope_start_y, method_name, k_sigma,
             window_scores.append(last_J)
             win_buf = {"vx": [], "roll": [], "pitch": []}
             if squash:
-                # current_z(k-1): ema_log[k] is not populated until
+                # current_ratio(k-1): ema_log[k] is not populated until
                 # monitor.step(k) later in this iteration, so read the most
                 # recent available value (previous step).
-                if adapting and monitor.current_z(k - 1) < k_sigma:
+                if adapting and monitor.current_ratio(k - 1) < k_sigma:
                     adapting = False
                     n_pauses += 1
                 elif not adapting and len(monitor.fire_steps) > n_fires_seen:
@@ -823,12 +813,12 @@ def run_trial(seed, slope_start_y, method_name, k_sigma,
 
     p.disconnect()
     n = len(log["y"])
-    # Time-to-squash: first step after the trigger where the z-scored EMA
-    # error is back below the trigger threshold K (continuous scan).
+    # Time-to-squash: first step after the trigger where the statistic
+    # (EMA / baseline mean) is back below the threshold K (continuous scan).
     squash_step = None
     if trigger_step is not None and np.isfinite(k_sigma):
-        z_tr = monitor.zscore_trace()[:n]
-        below = np.nonzero(z_tr[trigger_step + 1:] < k_sigma)[0]
+        r_tr = monitor.ratio_trace()[:n]
+        below = np.nonzero(r_tr[trigger_step + 1:] < k_sigma)[0]
         if len(below):
             squash_step = int(trigger_step + 1 + below[0])
     return dict(log=log, fell=fell, fall_step=fall_step,
@@ -840,7 +830,7 @@ def run_trial(seed, slope_start_y, method_name, k_sigma,
                 onstep_t=onstep_t, adapt_windows=adapt_windows,
                 n_pauses=n_pauses,
                 ema=monitor.ema_log[:n],
-                z=monitor.zscore_trace()[:n])
+                z=monitor.ratio_trace()[:n])
 
 
 def trial_metrics(res, slope_start_y):
@@ -908,79 +898,104 @@ def find_y10(seed, incumbent):
 
 # ── Stage 1: trigger calibration ─────────────────────────────────────────────
 
+CALIB_MARGIN = 1.3        # place K this factor above the stable-slope floor
+
+
 def _calib_job(job):
-    seed, incumbent, slope_deg, terrain_kind, adapt_t = job
+    _limit_threads()
+    seed, incumbent, oracle, slope_deg, terrain_kind, adapt_t = job
     global SLOPE_DEG, TERRAIN_KIND, ADAPT_T
     SLOPE_DEG = float(slope_deg)
     TERRAIN_KIND = terrain_kind
     ADAPT_T = float(adapt_t)
     inc = np.asarray(incumbent, float)
+    orc = np.asarray(oracle, float)
     box = (inc, inc)
     y10 = find_y10(seed, inc)
     if y10 is None:
         return None
-    # flat-only run (no slope in reach): z-trace for false positives
+    # flat-only run: statistic (ratio) trace on flat, for the false-positive scale
     flat = run_trial(seed, FAR_SLOPE_Y, "noadapt", k_sigma=np.inf,
                      incumbent=inc, oracle_params=inc, box=box,
                      duration=PRE_T + ADAPT_T)
-    # flat->slope run without adaptation: z-trace for detection delay
-    slope = run_trial(seed, y10, "noadapt", k_sigma=np.inf,
-                      incumbent=inc, oracle_params=inc, box=box,
-                      duration=PRE_T + ADAPT_T)
-    return dict(seed=seed, y10=y10,
-                z_flat=flat["z"], fell_flat=flat["fell"],
-                z_slope=slope["z"], fell_slope=slope["fell"])
+    # flat->slope switching to the slope-optimum (the STABLE reference): its
+    # settled ratio on the slope is the level K must sit just above. A low
+    # trigger K here just makes the switch fire at the transition.
+    sw = run_trial(seed, y10, "oracle", k_sigma=2.0,
+                   incumbent=inc, oracle_params=orc, box=box,
+                   duration=PRE_T + ADAPT_T)
+    return dict(seed=seed, y10=y10, r_flat=flat["z"],
+                r_sw=sw["z"], fell_sw=sw["fell"], trig=sw["trigger_step"])
 
 
 def calibrate(n_seeds, workers):
-    incumbent, _ = load_selected()
+    incumbent, oracle = load_selected()
     ctx = get_context("spawn")
     with ctx.Pool(workers, maxtasksperchild=2) as pool:
-        out = pool.map(_calib_job, [(s, incumbent, SLOPE_DEG, TERRAIN_KIND,
-                                     ADAPT_T) for s in range(n_seeds)])
+        out = pool.map(_calib_job, [(s, incumbent, oracle, SLOPE_DEG,
+                                     TERRAIN_KIND, ADAPT_T)
+                                    for s in range(n_seeds)])
     out = [o for o in out if o is not None]
+    if not out:
+        raise RuntimeError("all calibration seeds fell before the transition")
     arm_k = int(ARM_TIME / DT)
     kT = int(PRE_T / DT)
+    late_k = int((PRE_T + ADAPT_T - 5.0) / DT)   # last 5 s window
 
+    # Scales: flat false-positive ceiling and the stable-slope settled floor.
+    flat_max = max(float(np.max(o["r_flat"][arm_k:])) for o in out)
+    settled, fell_floor = [], []
+    for o in out:
+        r = o["r_sw"]
+        lo = min(late_k, len(r) - 1)
+        val = float(np.median(r[lo:])) if lo < len(r) else np.nan
+        (fell_floor if o["fell_sw"] else settled).append(val)
+    stable_floor = float(np.median(settled)) if settled else np.nan
+    fell_med = float(np.median(fell_floor)) if fell_floor else np.nan
+
+    K = max(stable_floor * CALIB_MARGIN, flat_max * 1.15)
     print(f"\ntrigger calibration on {len(out)} seeds "
-          f"(EMA z-score of 0.5 s rollout error)")
-    print(f"{'K':>5s} {'FP flat':>8s} {'miss':>6s} {'delay mean':>11s} "
-          f"{'delay max':>10s}")
-    chosen = None
-    for K in (3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0):
-        fp = sum(np.any(o["z_flat"][arm_k:] > K) for o in out)
-        delays, miss = [], 0
-        for o in out:
-            zs = o["z_slope"]
-            idx = np.where(zs[arm_k:] > K)[0]
-            if len(idx) == 0:
-                miss += 1
-            else:
-                delays.append((idx[0] + arm_k - kT) * DT)
-        dm = np.mean(delays) if delays else np.nan
-        dx = np.max(delays) if delays else np.nan
-        print(f"{K:5.1f} {fp:>5d}/{len(out)} {miss:>4d} {dm:11.2f} {dx:10.2f}")
-        if chosen is None and fp == 0 and miss == 0:
-            chosen = dict(k_sigma=float(K), fp=int(fp), miss=int(miss),
-                          delay_mean=float(dm), delay_max=float(dx))
-    if chosen is None:
-        raise RuntimeError("no K with 0 false positives and 0 misses; "
-                           "inspect the z traces")
-    # early-trigger check: any flat->slope trigger before the slope?
-    early = sum(np.any(o["z_slope"][arm_k:kT] > chosen["k_sigma"]) for o in out)
-    chosen["early_on_slope_runs"] = int(early)
+          f"(statistic = goal cross-entropy / flat-baseline mean)")
+    print(f"  flat ratio ceiling      : {flat_max:.2f}")
+    print(f"  stable-slope floor (med): {stable_floor:.2f}  "
+          f"({len(settled)}/{len(out)} switch runs survived)")
+    print(f"  falling-slope level(med): {fell_med:.2f}")
+    print(f"  -> K = {K:.2f} (>{CALIB_MARGIN}x stable floor, >1.15x flat ceiling)")
+    # detection delay of the switch trigger, and separation check at K
+    delays = [(o["trig"] - kT) * DT for o in out if o["trig"] is not None]
+    n_sq = sum(1 for v in settled if v < K)
+    n_fell_above = sum(1 for v in fell_floor if v >= K)
+    print(f"  detection delay mean {np.mean(delays):.2f} s | "
+          f"at K: {n_sq}/{len(settled)} stable squash, "
+          f"{n_fell_above}/{len(fell_floor)} falling stay above")
+
+    chosen = dict(k_sigma=float(K), statistic="crossentropy_ratio_to_baseline",
+                  flat_ceiling=flat_max, stable_floor=stable_floor,
+                  falling_level=fell_med, n_survivors=len(settled),
+                  delay_mean=float(np.mean(delays)) if delays else np.nan)
     os.makedirs(RESULTS_DIR, exist_ok=True)
     with open(TRIGGER_JSON, "w") as f:
         json.dump(chosen, f, indent=2)
-    print(f"\nchosen K = {chosen['k_sigma']} "
-          f"(mean delay {chosen['delay_mean']:.2f} s, "
-          f"max {chosen['delay_max']:.2f} s, early triggers: {early})")
     print(f"saved {TRIGGER_JSON}")
 
 
 # ── Stage 2: main experiment ─────────────────────────────────────────────────
 
+def _limit_threads():
+    """Pin BLAS/torch to one thread per worker to avoid CPU oversubscription
+    (N workers x multi-threaded BLAS/torch thrash the cores ~5x)."""
+    for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+              "NUMEXPR_NUM_THREADS"):
+        os.environ[v] = "1"
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
 def _seed_job(job):
+    _limit_threads()
     (seed, incumbent, oracle_params, k_sigma, trust_radius, arms,
      slope_deg, terrain_kind, reduced, adapt_t, squash) = job
     # Spawned workers re-import the module with defaults; set the terrain this
