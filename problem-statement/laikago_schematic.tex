@@ -1,0 +1,83 @@
+% Schematic side view of the Laikago quadruped, annotated with the CPG's
+% actuated joints (hip + knee per leg), walking toward an incline ahead.
+% This is a bare tikzpicture fragment: \input it into a document that provides
+%   \usepackage{tikz}
+%   \usetikzlibrary{arrows.meta, calc, patterns, angles, quotes, shapes.geometric}
+% or wrap it in a standalone document to compile to a PDF for \includegraphics.
+\begin{tikzpicture}[
+  >=Latex, line join=round, line cap=round,
+  trunk/.style={fill=gray!22, draw=black!75, line width=1pt, rounded corners=6pt},
+  link/.style={draw=black!82, line width=2.4pt},
+  farlink/.style={draw=black!32, line width=1.9pt},
+  joint/.style={circle, fill=teal!68!black, draw=black, inner sep=0pt, minimum size=6.5pt},
+  farjoint/.style={circle, fill=teal!25, draw=black!35, inner sep=0pt, minimum size=5pt},
+  foot/.style={fill=black!78, draw=black, ellipse, inner sep=0pt,
+               minimum width=11pt, minimum height=5pt},
+  farfoot/.style={fill=black!30, draw=black!40, ellipse, inner sep=0pt,
+                  minimum width=9pt, minimum height=4pt},
+  lead/.style={draw=black!55, line width=0.5pt},
+  lbl/.style={font=\small},
+  ang/.style={draw=orange!80!black, line width=1pt, ->},
+]
+
+% ---- ground: flat, then an incline over the front (rightmost) 20% ----
+% ground spans x in [-1.4, 7.8] (width 9.2); the ramp runs the last 1.84 (= 20%).
+\fill[pattern=north east lines, pattern color=black!35]
+  (-1.4,-0.4) -- (-1.4,0) -- (5.96,0) -- (7.8,0.9) -- (7.8,-0.4) -- cycle;
+\draw[line width=1pt] (-1.4,0) -- (5.96,0) -- (7.8,0.9);
+% small incline-angle marker + label on the ramp
+\draw[black!55, line width=0.7pt] (6.5,0) arc (0:26:0.54);
+\node[lbl, black!60, rotate=26, anchor=south] at (6.9,0.44) {incline};
+
+% ==== far pair (behind, lighter) ====
+% far front
+\coordinate (Fh) at (4.2,2.55); \coordinate (Fk) at (3.7,1.2); \coordinate (Ff) at (4.45,0.06);
+\draw[farlink] (Fh) -- (Fk) -- (Ff);
+\node[farjoint] at (Fh){}; \node[farjoint] at (Fk){}; \node[farfoot] at (Ff){};
+% far rear (knee forward, same bend as front)
+\coordinate (Rh) at (1.4,2.55); \coordinate (Rk) at (0.9,1.2); \coordinate (Rf) at (1.5,0.06);
+\draw[farlink] (Rh) -- (Rk) -- (Rf);
+\node[farjoint] at (Rh){}; \node[farjoint] at (Rk){}; \node[farfoot] at (Rf){};
+
+% ==== trunk ====
+\draw[trunk] (0.6,2.5) rectangle (4.9,3.5);
+\node[lbl] at (2.75,3.02) {base};
+
+% ==== near pair (both knees bend forward, identical geometry) ====
+% near front leg
+\coordinate (fh) at (4.55,2.5); \coordinate (fk) at (4.05,1.05); \coordinate (ff) at (4.75,0);
+\draw[link] (fh) -- (fk) -- (ff);
+\node[foot] at (ff){};
+% near rear leg
+\coordinate (rh) at (0.95,2.5); \coordinate (rk) at (0.45,1.05); \coordinate (rf) at (1.15,0);
+\draw[link] (rh) -- (rk) -- (rf);
+\node[foot] at (rf){};
+\node[joint] (Jfh) at (fh){}; \node[joint] (Jfk) at (fk){};
+\node[joint] at (rh){}; \node[joint] at (rk){};
+
+% ==== joint-angle annotations on the near front leg ====
+% hip angle: between downward vertical from hip and the thigh
+\draw[ang] ($(fh)+(0,-0.62)$) arc (-90:-70:0.62);
+\node[lbl, orange!70!black] at ($(fh)+(0.42,-0.5)$) {$\varphi_{\text{hip}}$};
+% knee angle: between the thigh extension and the shank
+\coordinate (fk_ext) at ($(fk)!-0.7!(fh)$);
+\draw[ang] ($(fk)!0.5!(fk_ext)$) arc (-72:-140:0.5);
+\node[lbl, orange!70!black] at ($(fk)+(0.55,-0.42)$) {$\varphi_{\text{knee}}$};
+
+% ==== labels with leader lines ====
+\draw[lead] (Jfh) -- ($(fh)+(1.0,0.55)$);
+\node[lbl, anchor=west] at ($(fh)+(1.0,0.55)$) {hip joint};
+\draw[lead] (Jfk) -- ($(fk)+(1.15,0.15)$);
+\node[lbl, anchor=west] at ($(fk)+(1.15,0.15)$) {knee joint};
+% foot contact, labelled on the near rear foot (belly gap has room)
+\draw[lead] (rf) -- ($(rf)+(0.75,0.7)$);
+\node[lbl, anchor=west] at ($(rf)+(0.75,0.7)$) {foot contact $c_i$};
+
+% ==== orientation: forward direction + frame ====
+\draw[->, line width=1.1pt, black!70] (5.7,2.05) -- (6.8,2.05) node[right, lbl]{forward};
+\begin{scope}[shift={(-0.9,0.55)}, black!60, line width=0.9pt]
+  \draw[->] (0,0) -- (0.75,0) node[right, font=\footnotesize]{$x$};
+  \draw[->] (0,0) -- (0,0.75) node[above, font=\footnotesize]{$z$};
+\end{scope}
+
+\end{tikzpicture}

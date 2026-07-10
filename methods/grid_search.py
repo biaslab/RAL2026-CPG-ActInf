@@ -25,7 +25,7 @@ from methods.cpg_bounds import bounds
 
 def gridsearch_optimize_cpg(
     bounds: torch.Tensor,
-    target_forward_position: float,
+    target_velocity: float,
     robot_mass: float,
     n_trials: int = 100,
     optimizer_name: str = "GridSearch",
@@ -44,9 +44,9 @@ def gridsearch_optimize_cpg(
         "fell", "stabilityindex",
         "rmsrolldeg", "rmspitchdeg",
         "opttimesec", "simtimesec", "totaltimesec",
-        "couplinggain", "wswing", "wstance",
-        "FFAST", "STOPGAIN",
-        "hipamplitude", "kneeamplitude", "b",
+        "gc", "gp", "omegaswing",
+        "omegastance", "mu",
+        "xofffront", "xoffhind", "sigmaN",
     ]
     csv_file   = open(csv_path, 'w', newline='')
     csv_writer = csv.DictWriter(csv_file, fieldnames=csv_columns)
@@ -61,8 +61,8 @@ def gridsearch_optimize_cpg(
     samples = lower + unit_samples * (upper - lower)
     train_X = torch.tensor(samples, dtype=torch.double)
 
-    param_names = ["couplinggain", "wswing", "wstance", "FFAST",
-                   "STOPGAIN", "hipamplitude", "kneeamplitude", "b"]
+    param_names = ["gc", "gp", "omegaswing", "omegastance",
+                   "mu", "xofffront", "xoffhind", "sigmaN"]
 
     objectives        = []
     cots              = []
@@ -75,7 +75,7 @@ def gridsearch_optimize_cpg(
     print("\n" + "="*70)
     print("LHS GRID SEARCH OVER CPG PARAMETERS")
     print("="*70)
-    print(f"Target forward position: {target_forward_position} m (lateral target = 0)")
+    print(f"Target forward velocity: {target_velocity} m/s (lateral target = 0)")
     print(f"Robot mass: {robot_mass} kg")
     print(f"Total trials: {n_trials}")
     print(f"Optimizer: {optimizer_name}, Seed: {seed}")
@@ -89,7 +89,7 @@ def gridsearch_optimize_cpg(
         opt_time_sec = time.time() - opt_start
 
         J, metrics = evaluate_candidate(
-            x_np, target_forward_position, robot_mass,
+            x_np, target_velocity, robot_mass,
             optimizer_name, seed, i + 1,
         )
 
@@ -155,7 +155,7 @@ def gridsearch_optimize_cpg(
 if __name__ == "__main__":
     train_X, train_Y, best_params, N_walk, D_cum = gridsearch_optimize_cpg(
         bounds,
-        target_forward_position=4.0,
+        target_velocity=0.5,
         robot_mass=10.0,
         n_trials=100,
         optimizer_name="GridSearch",
