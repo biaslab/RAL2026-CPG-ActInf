@@ -58,8 +58,7 @@
 
 \title{\LARGE \bf
 % Online Bayesian optimization of central pattern generator parameters in quadrupedal robot locomotion
-%Rapid terrain adaptation through continual learning of central pattern generator parameters for quadrupedal robot locomotion
-Event-triggered adaptation of central pattern generator parameters\\ in quadrupedal robot locomotion
+Continually learning central pattern generator parameters for quadrupedal robot locomotion with active inference agents
 }
 
 
@@ -108,16 +107,14 @@ A complementary line of work tunes gait parameters as black-box optimization, fr
 
 In the following, we contribute
 \begin{itemize}
-    \item evidence that terrain-matched CPG parameters confer a durable survival advantage across repeated terrain transitions, so that resuming stable locomotion calls for online adaptation;
-    \item an event-triggered adaptation scheme, driven by a re-arming prediction-error monitor, together with the finding that online black-box gait optimization (grid search and Bayesian optimization) is actively destructive on hazardous transitions; and
-    \item an autoregressive active inference agent that avoids this destabilization by selecting from a learned model, and the result that aligning its goal prior with the stability criterion is what turns this caution into a significant improvement over the incumbent gait on a sustained transition, with robust adaptation across recurring transitions identified as an open problem.
+    \item the design of an intelligent agent that continuously updates parameters of a central pattern generator, and
+    \item by benchmarking this agent against offline grid search and online Bayesian optimization.
 \end{itemize}
 
 
 
 \clearpage
 \section{PROBLEM STATEMENT}
-\label{sec:problem-statement}
 
 We first describe the base platform whose motion defines the locomotion objective, and then the central pattern generator that produces the coordinated leg motion driving it.
 We then argue that the parameters yielding stable locomotion depend on the terrain, so that a parameter set tuned for one terrain degrades once the terrain changes.
@@ -174,28 +171,14 @@ with $\varsigma(\cdot)$ a sigmoid function. Then, the oscillators evolve as
   \dot{y}_i &= \beta\,(u - r_i^2)\,y_i + \omega_i\,x_i
                + \gamma \sum_{j=1}^4 k_{ij}\,y_j + s_i, \label{eq:ydot} \, ,
 \end{align}
-where $r_i = \sqrt{x_i^2 + y_i^2}$, $u = 2$ is the fixed squared limit-cycle amplitude (a constant, not tuned), $\alpha, \beta > 0$ are convergence rates, $\gamma$ is the coupling gain, and $b$ controls the sharpness of the frequency transition between stance and swing phases.
+where $r_i = \sqrt{x_i^2 + y_i^2}$ is the instantaneous amplitude, $u$ defines the squared amplitude of the limit cycle, and $\alpha, \beta > 0$ are convergence rates (typically $\beta \gg \alpha$ to enforce stronger convergence along the $y$-axis). The term $\omega_i$ transitions between the stance and swing frequencies depending on the phase $y_i$, and $\gamma$ is the coupling gain added to have stronger coupling and less dependency on the initial conditions settings. The sigmoid functions in Equation \ref{Equation 3} ensure smooth and continuous transition between the stance and swing frequencies. A sigmoid is an S-shaped mathematical function that smoothly interpolates between two values; in this context, it gradually shifts the oscillator’s frequency based on the sign and magnitude of $y_i$. the parameter $b$ sets the sharpness between this transition. This allows the oscillator to gradually change between the swing and the stance phases according to the sign and magnitude of $y_i$. 
+The coupling matrix $K = [k_{ij}]$ is gait-specific.
 
-The final term $s_i$ in Eq.~\ref{eq:ydot} is the contact-driven sensory feedback, and it is where the fast-contact gain $F_{\text{fast}}$ and the stop gain $K_{\text{stop}}$ enter the dynamics.
-It couples each oscillator to its leg's stance or swing phase, read from $y_i$ by hysteresis, and to the binary foot-contact signal $c_i \in \{0, 1\}$:
-\begin{align}
-    s_i = \begin{cases}
-        K_{\text{stop}}\Big(\omega_i x_i - \gamma \sum_{j} k_{ij} y_j\Big),
-            & \text{stop},\\[2pt]
-        F_{\text{fast}}\,\operatorname{sgn}(y_i), & \text{fast},\\[2pt]
-        0, & \text{otherwise}.
-    \end{cases}
-    \label{eq:feedback}
-\end{align}
-The \emph{stop} case applies when phase and contact disagree, that is a swing phase with no contact ($c_i = 0$) or a stance phase with contact ($c_i = 1$), and $K_{\text{stop}}$ scales a correction that arrests the oscillator; the \emph{fast} case applies otherwise during swing or stance, where $F_{\text{fast}}$ advances it in the direction of $y_i$; the feedback is zero during the transition between phases.
-This is a Righetti-style load feedback that keeps the rhythm entrained to ground contact \cite{righetti2008pattern}.
 
-The CPG outputs $(x_i, y_i)$ are mapped to hip and knee joint angles:
-\begin{align}
-\varphi_{\text{hip}} &= \varphi_{\text{hip}}^{0} + A_{\text{hip}}\, x_i , \\
-\varphi_{\text{knee}} &= \varphi_{\text{knee}}^{0} - A_{\text{knee}}\, \max(0, y_i) ,
-\end{align}
-where $x_i$ drives the forward-backward hip swing and $y_i$ controls knee flexion, the fixed offsets $\varphi_{\text{hip}}^{0}$ and $\varphi_{\text{knee}}^{0}$ set the neutral pose, the gains $A_{\text{hip}}$ and $A_{\text{knee}}$ scale the swing and flexion amplitudes, and negative $y_i$ is suppressed to prevent hyperextension.
+% Different gaits emerge from the choice of the coupling matrix. Figure~\ref{fig:coupling_matrices} illustrates the matrices for trot, pace, bound, and walk, each defining a distinct set of stable phase relationships.
+%
+%
+Figure \ref{fig:CPGoutputs}  shows the time evolution of the outputs from the Hopf CPG model and the joint angles for the walking gait simulation. The CPGs demonstrate the expected sinusoidal movement for each leg. Figure~\ref{fig:hopf_limit_cycle} shows the limit cycle behavior of the CPG, where the state variables \( x_i \) and \( y_i \) converge to a circular trajectory of radius \( \sqrt{\mu} \) and closely follow this limit cycle over time. This demonstrates the oscillator's stability and periodicity, which are critical for generating smooth, consistent joint trajectories necessary for coordinated legged locomotion.
 
 The behavior of the CPG is governed by a small set of parameters, collected in the vector
 \begin{align}
@@ -205,8 +188,12 @@ The behavior of the CPG is governed by a small set of parameters, collected in t
 comprising the coupling gain, the phase-dependent stance and swing frequencies, the fast-contact gain $F_{\text{fast}}$ and stop gain $K_{\text{stop}}$ of the sensory feedback (Eq.~\ref{eq:feedback}), the hip and knee amplitudes, and the sigmoid sharpness $b$ of Eq.~\ref{eq:omega_i}.
 These parameters set the gait shape, and are held fixed during locomotion.
 
-\subsection{Terrain-dependent parameters}
-\label{sec:terrain-dependent}
+% \begin{figure}[htbp]
+%     \centering
+%     \includegraphics[width=0.4\textwidth]{Image/Hopf_limitcycle_plot.png}
+%     \caption{Limit cycle behavior of Hopf oscillators.}
+%     \label{fig:hopf_limit_cycle}
+% \end{figure}
 
 For a fixed terrain, the parameter vector $\theta$ can be tuned to produce stable locomotion.
 Let $e$ denote the terrain.
@@ -326,25 +313,26 @@ An event fires when the smoothed statistic exceeds $K$ for $P$ consecutive steps
 Symmetrically, adaptation is paused whenever the statistic returns below $K$, so re-tuning runs only while the incumbent is provably suboptimal.
 
 \section{EXPERIMENTS}
-\label{sec:experiments}
 
-We test whether \emph{event-triggered} online adaptation of the CPG parameters can restore stable locomotion after a terrain change, and we compare three parameter-selection strategies as the adaptation mechanism: a \emph{grid search} that samples the parameter space by Latin-hypercube design, online \emph{Bayesian optimization} (BO) with a Gaussian-process surrogate and a UCB acquisition function, and the proposed \emph{MARX-EFE} agent of Section~\ref{sec:methods}.
-Grid search and BO are black-box optimizers that can only assess a candidate gait by walking on it, whereas MARX-EFE selects parameters from its continually updated model without such trials.
-The comparison targets the transient after the terrain change: the hypothesis is that the method which finds better parameters faster keeps the robot upright, because a growing attitude deviation is progressively harder to correct.
+We evaluate three parameter-selection strategies for the Hopf-oscillator CPG controller on the Laikago quadruped in PyBullet: (i) an offline \emph{grid search} over a small set of CPG parameters; (ii) online \emph{Bayesian optimization} (BO) with a Gaussian-process surrogate and a UCB acquisition function; and (iii) the proposed \emph{MARX-EFE} active inference agent, which continually updates CPG parameters by minimising expected free energy. Grid search serves as a fixed, non-adaptive reference point, BO serves as a state-of-the-art black-box optimizer, and MARX-EFE is the proposed continual learning agent.
 
-\subsection{Setup}
-\label{sec:exp-setup}
+All three methods optimize in the same 8-dimensional parameter space with identical bounds:
+\begin{align*}
+    \theta = [\gamma, \omega_{\mathrm{swing}}, \omega_{\mathrm{stance}}, F_{\mathrm{fast}}, K_{\mathrm{stop}}, A_{\mathrm{hip}}, A_{\mathrm{knee}}, b]\,,
+\end{align*}
+corresponding to the coupling gain, the two phase-dependent frequencies, the Righetti-style fast-contact gain, the stop-gain, the hip and knee amplitudes, and the sigmoid sharpness $b$ from Eq.~\ref{Equation 3}. Each trial is a $T=4.5$\,s episode of simulated walking on flat ground with $\Delta t = 0.01$\,s, a $1.5$\,s settling window excluded from the metrics, and a target forward velocity of $1.0$\,m/s. Parameter updates occur \emph{online}: every trial carries the CPG state forward and smoothly interpolates between the previous and new parameters over the first $150$ steps.
 
-Experiments use the Laikago quadruped in PyBullet at a control rate of $100$\,Hz ($\Delta t = 0.01$\,s).
-The robot walks along a corridor that is flat for the first stretch and then rises at a $10^{\circ}$ incline.
-It starts with the flat-optimal parameters $\theta^{\star}(\text{flat})$ and, after $10$\,s of flat walking, meets the incline; the incline is placed at the robot's forward position at that instant, measured per seed by a calibration run, so that every run enters the slope in the same phase of its gait.
-The reference optima $\theta^{\star}(\text{flat})$ and $\theta^{\star}(10^{\circ})$ are obtained beforehand by maximizing the criterion of Eq.~\ref{eq:criterion} on each terrain with Bayesian optimization, using $v^{*} = 0.5$\,m/s, $\psi_0 = 10^{\circ}$, and a fall penalty $c_f = 2$.
+\paragraph{Performance metrics}
+We score each method on four quantities computed over the $3.0$\,s steady-state window: the scalar objective
+\begin{align} \label{eq:obj}
+    J = w_1\,R_v - w_2\,\mathrm{CoT} - w_3\,\mathcal{S}\,,
+\end{align}
+with velocity reward $R_v = \frac{1}{T}\sum_k \exp(-\|v_k-v^{*}\|^2/\sigma_v^2)$, cost of transport $\mathrm{CoT}=\int P_{\mathrm{mech}}\,\mathrm{d}t / (m g d)$, and combined RMS stability $\mathcal{S}=\sqrt{\mathrm{RMS}(\gamma^r)^2+\mathrm{RMS}(\gamma^p)^2}$; the forward distance $d_y$; the lateral drift $|d_x|$; and the fall rate. To compare sample efficiency, we report the number of trials $N_{\mathrm{walk}}$ required to reach $J\ge J_{\mathrm{th}}$ with cumulative fall rate below $r_{\mathrm{th}}$, and the cumulative forward distance $D_{\mathrm{cum}}$ accumulated over the optimization horizon.
 
-We run $N = 100$ seeds.
-Across-seed variability comes only from a small perturbation of the initial joint angles ($\sigma = 0.002$\,rad), which the contact dynamics amplify into distinct trajectories; the start pose and the terrain geometry are otherwise identical across seeds, which isolates the response to the terrain change from the choice of starting point.
+\subsection{Experiment 1: Comparison of optimization strategies}
+\label{sec:exp1-comparison}
 
-\subsection{Detecting the terrain change}
-\label{sec:exp-trigger}
+In this experiment we compare grid search, BO, and MARX-EFE on flat terrain with a fixed target velocity of $1.0$\,m/s. Grid search is run offline on a restricted $(\alpha,\beta,b)$ sub-grid with the remaining parameters fixed, producing a ranking of static configurations. BO and MARX-EFE are run for $100$ online trials, each repeated over $5$ random seeds. For BO we use UCB with a decaying schedule $\beta_t = \max(\beta_{\min}, \beta_0\,\gamma^{t-t_0})$ and standardized outputs; for MARX-EFE we use a matrix-normal--Wishart prior over the 8D parameter regression coefficients and infer a new parameter vector every $50$ simulation steps by minimizing the EFE of Eq.~\ref{eq:total-MAP} with an $L^2$ effort regularizer.
 
 Adaptation is triggered by the optimality monitor of Section~\ref{sec:trigger}.
 A MARX belief (Eq.~\ref{eq:likelihood}) is filtered online from the observation $y_k = (v_x, v_y, \psi_p, \psi_r)$ with forgetting factor $0.995$, under a stability-oriented goal prior whose attitude channels are tightened, a $20^{\circ}$ standard deviation on pitch to tolerate the steady incline offset and $6^{\circ}$ on roll, so the statistic responds to a loss of balance rather than to the slower climb.
@@ -450,8 +438,13 @@ The active-inference machinery therefore contributes, but only once its goal pri
 %\label{fig:theta}
 %\end{figure}
 
-\subsection{Repeated transitions}
-\label{sec:exp-repeated}
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\linewidth]{figures/exp1_fallrate_and_dcum.pdf}
+    \framebox[\linewidth]{\rule{0pt}{3.5cm}\textit{placeholder: cumulative fall rate and $D_{\mathrm{cum}}$}}
+    \caption{Safety and efficiency. (Left) cumulative fall rate vs.\ trial index; (right) cumulative forward distance $D_{\mathrm{cum}}$ walked across all trials, a measure of sample-efficient exploration.}
+    \label{fig:exp1-safety}
+\end{figure}
 
 A single incline is a mild test of adaptation, because a fixed gait that survives the transition can coast through the rest of the bout.
 We therefore repeat the experiment on a corridor of two consecutive $10^{\circ}$ ramps separated by flat landings, so that the robot meets the terrain change more than once and a mismatched gait is punished repeatedly.
@@ -483,6 +476,32 @@ Mean $\bar{V}$       & $0.22$ & $0.44$        & $-0.46$ & $-0.53$ & $0.27$ & $0.
 \end{tabular}
 \end{table}
 
+\subsection{Experiment 2: Sensitivity to exploration schedule}
+\label{sec:exp2-beta}
+
+A known failure mode of BO is that its behaviour depends strongly on the acquisition-function exploration schedule. We sweep five $\beta_t$ schedules (\texttt{conservative}, \texttt{moderate}, \texttt{balanced}, \texttt{late\_decay}, \texttt{exploratory}) while holding all other BO settings fixed, and compare them against a single MARX-EFE run. The purpose is to show (a) that BO requires schedule tuning to achieve competitive sample efficiency, and (b) that MARX-EFE does not require such a schedule because the exploration--exploitation trade-off is implicit in the epistemic term of the expected free energy.
+
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\linewidth]{figures/exp2_beta_sweep.pdf}
+    \framebox[\linewidth]{\rule{0pt}{3.5cm}\textit{placeholder: bar chart of $N_{\mathrm{walk}}$ per $\beta$-schedule}}
+    \caption{BO sensitivity to the UCB $\beta_t$ schedule. $N_{\mathrm{walk}}$ (lower is better) for each schedule, versus the MARX-EFE reference.}
+    \label{fig:exp2-beta-sweep}
+\end{figure}
+
+\subsection{Experiment 3: Online adaptation to target-velocity changes}
+\label{sec:exp3-adaptation}
+
+A key claim of the continually-learning agent is that it can adapt online to non-stationary tasks without re-tuning. We change the target velocity $v^{*}$ mid-episode from $0.5$\,m/s to $1.0$\,m/s to $0.8$\,m/s, and measure how quickly each method tracks the new set-point. Only methods that update their parameters online (BO and MARX-EFE) are evaluated here.
+
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\linewidth]{figures/exp3_targetvel_change.pdf}
+    \framebox[\linewidth]{\rule{0pt}{3.5cm}\textit{placeholder: $v_x(t)$ with target-velocity step changes}}
+    \caption{Online target-velocity tracking. Realised forward velocity $v_x(t)$ under a step change in $v^{*}$; BO and MARX-EFE shown separately.}
+    \label{fig:exp3-targetvel}
+\end{figure}
+
 
 \section{DISCUSSION}
 
@@ -505,16 +524,8 @@ Coupling the agent to closed-loop attitude feedback and validating on hardware a
 
 \section{CONCLUSIONS}
 
-We showed that the CPG parameters producing stable quadruped locomotion shift with the terrain, so that a gait tuned for flat ground becomes unstable on an incline, and that across repeated transitions the terrain-matched optimum confers a durable survival advantage, so resuming stable walking calls for online adaptation.
-We proposed an event-triggered scheme in which a prediction-error monitor detects each terrain change and an adaptation method re-tunes the CPG within the same walking bout, and we compared grid search, Bayesian optimization, and an autoregressive active inference agent as that method.
-Online black-box search roughly doubles the fall rate by destabilizing the robot while probing candidate gaits, whereas the active inference agent selects from a learned model and avoids this harm; and once its goal prior encodes attitude stability rather than velocity, it significantly outperforms keeping the incumbent gait on a sustained transition, with the information-seeking term of the free energy essential to the gain.
-Selecting parameters from a model rather than by physical trial avoids destabilization, and encoding stability in the agent's goal turns caution into improvement; making that improvement robust across recurring transitions, where the terrain optimum remains out of the model's reach, is the main direction for future work.
 
-
-% Re-enable this last-page column-balancing hack for the camera-ready version.
-% Disabled while Discussion/Conclusions are empty: shrinking the tail here
-% leaves too little height to flush the full-width figure and loops the output.
-% \addtolength{\textheight}{-12cm}   % This command serves to balance the column lengths
+\addtolength{\textheight}{-12cm}   % This command serves to balance the column lengths
                                   % on the last page of the document manually. It shortens
                                   % the textheight of the last page by a suitable amount.
                                   % This command does not take effect until the next page
