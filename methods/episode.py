@@ -1,9 +1,12 @@
-"""Shared open-loop CPG episode runner used by the terrain experiments.
+"""Shared CPG episode runner used by the terrain experiments.
 
 One place defines how a bout is simulated (reset + jitter, CPG stepping, logging)
-so the attitude convention and dynamics are identical everywhere. Attitude is in
-the PHYSICAL convention: with the robot walking in +Y, getEulerFromQuaternion
-returns (forward nose-pitch, lateral bank-roll, yaw), unpacked as pitch, roll, yaw.
+so the attitude convention and dynamics are identical everywhere. The previous
+step's trunk roll/pitch is fed back to the CPG, so the VMC body-attitude feedback
+is active whenever ``JointCPG.ATTITUDE_FEEDBACK`` is set (its default); with the
+flag off the controller is open-loop. Attitude is in the PHYSICAL convention: with
+the robot walking in +Y, getEulerFromQuaternion returns (forward nose-pitch,
+lateral bank-roll, yaw), unpacked as pitch, roll, yaw.
 """
 
 import numpy as np
@@ -73,6 +76,7 @@ def run_episode(terrain_cfg, seed, params_start, params_target=None,
            ["y", "z", "x", "vx", "roll", "pitch", "power"]}
     fell, fall_step = False, None
     actuated_ids = [1, 2, 5, 6, 9, 10, 13, 14]   # hip + knee per leg
+    roll = pitch = 0.0                           # previous-step attitude for CPG feedback
 
     for k in range(n_steps):
         if params_target is not None and switch_step is not None and k >= switch_step:
@@ -84,7 +88,7 @@ def run_episode(terrain_cfg, seed, params_start, params_target=None,
         raw = np.array([int(len(p.getContactPoints(
             bodyA=0, bodyB=robot, linkIndexA=-1, linkIndexB=feet[j])) > 0)
             for j in range(4)])
-        hips, knees = cpg.step(applied, raw, DT)
+        hips, knees = cpg.step(applied, raw, DT, roll=roll, pitch=pitch)
         for j in range(4):
             abd, hip, knee = joint_IDs_full[LEG_NAMES[j]]
             p.setJointMotorControl2(robot, abd, p.POSITION_CONTROL,

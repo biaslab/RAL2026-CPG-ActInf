@@ -634,6 +634,25 @@ class JointCPG:
                   [-1, 1, 0, -1],
                   [1, -1, -1, 0]], dtype=float)
 
+    # ── VMC-style body-attitude feedback (posture leveling) ──────────────────
+    # A virtual PD on the trunk roll/pitch, distributed to the legs as knee
+    # (leg-length) corrections: a leg on the sinking side straightens to push
+    # that corner back up, so the trunk stays level. Inactive unless roll/pitch
+    # are supplied to step(), so the open-loop controller is the default and all
+    # existing call sites are unchanged. Roll acts on the raw angle (straight
+    # walking has no sustained bank, and lateral tip-over is the main hazard);
+    # pitch acts on the deviation from a slow baseline so a steady incline offset
+    # is tolerated rather than fought. Signs are validated empirically.
+    ATTITUDE_FEEDBACK = True
+    KP_ROLL, KD_ROLL = 0.8, 0.05        # knee rad per rad / per rad/s of roll
+    KP_PITCH, KD_PITCH = 0.5, 0.05      # knee rad per rad / per rad/s of pitch
+    ROLL_SIGN, PITCH_SIGN = -1.0, -1.0  # set by empirical sign check (slope test)
+    ATT_EMA_ALPHA = 0.01                # pitch baseline leak (~1 s at 100 Hz)
+    DKNEE_CLIP = 0.35                   # max knee correction [rad]
+    # per-leg geometry signs for legs [0=FL, 1=FR, 2=RL, 3=RR]
+    _FRONT = np.array([1.0, 1.0, -1.0, -1.0])   # +front / -hind (pitch)
+    _LEFT = np.array([1.0, -1.0, 1.0, -1.0])    # +left / -right (roll)
+
     def __init__(self, n_legs=4):
         self.n = n_legs
         theta = [0, np.pi / 2, np.pi, 3 * np.pi / 2]
@@ -641,6 +660,10 @@ class JointCPG:
         self.y = np.array([np.sqrt(self.U) * np.sin(t) for t in theta])
         self.deb = np.zeros(n_legs, dtype=int)
         self.cc = np.zeros(n_legs, dtype=int)
+        self.prev_roll = 0.0
+        self.prev_pitch = 0.0
+        self.pitch_ema = 0.0
+        self._att_init = False
         self.phase = []
         for j in range(n_legs):
             if self.y[j] > self.SWING_ENTER:
@@ -666,8 +689,12 @@ class JointCPG:
         self.phase[j] = s
         return s
 
-    def step(self, params_8d, raw_contacts, dt):
-        """Advance one control tick; return (hip_angles, knee_angles) arrays."""
+    def step(self, params_8d, raw_contacts, dt, roll=None, pitch=None):
+        """Advance one control tick; return (hip_angles, knee_angles) arrays.
+
+        If the trunk ``roll`` and ``pitch`` (rad) are supplied, a VMC-style
+        posture-leveling term is added to the knee targets (see the class-level
+        attitude-feedback constants); if omitted, the controller is open-loop."""
         coupling_gain, w_swing, w_stance, F_FAST, STOP_GAIN, hip_amp, knee_amp, b = params_8d
         x_prev, y_prev = self.x.copy(), self.y.copy()
 
@@ -705,6 +732,23 @@ class JointCPG:
         self.x, self.y = x_new, y_new
         hip_angles = self.HIP_OFFSET + hip_amp * x_new
         knee_angles = self.KNEE_OFFSET - knee_amp * np.maximum(0.0, y_new)
+
+        # VMC-style attitude feedback: level the trunk by adjusting leg length.
+        if self.ATTITUDE_FEEDBACK and roll is not None and pitch is not None:
+            if not self._att_init:                       # seed baselines/derivs
+                self.prev_roll, self.prev_pitch = roll, pitch
+                self.pitch_ema = pitch
+                self._att_init = True
+            roll_rate = (roll - self.prev_roll) / dt
+            pitch_rate = (pitch - self.prev_pitch) / dt
+            self.prev_roll, self.prev_pitch = roll, pitch
+            self.pitch_ema += self.ATT_EMA_ALPHA * (pitch - self.pitch_ema)
+            d_pitch = pitch - self.pitch_ema             # tolerate steady incline
+            roll_cmd = self.ROLL_SIGN * (self.KP_ROLL * roll + self.KD_ROLL * roll_rate)
+            pitch_cmd = self.PITCH_SIGN * (self.KP_PITCH * d_pitch + self.KD_PITCH * pitch_rate)
+            dknee = np.clip(self._FRONT * pitch_cmd + self._LEFT * roll_cmd,
+                            -self.DKNEE_CLIP, self.DKNEE_CLIP)
+            knee_angles = knee_angles + dknee
         return hip_angles, knee_angles
 
 

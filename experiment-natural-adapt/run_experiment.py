@@ -166,6 +166,7 @@ def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce"):
     seg_anchor = 0
     applied = seg_start.copy()
     pos_y = 0.0                                    # forward position for friction
+    roll = pitch = 0.0                             # previous-step attitude for CPG feedback
 
     trigger_step = None
     guard = None
@@ -220,7 +221,7 @@ def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce"):
         raw = np.array([int(len(p.getContactPoints(
             bodyA=0, bodyB=robot, linkIndexA=-1, linkIndexB=feet[j])) > 0)
             for j in range(4)])
-        hips, knees = cpg.step(applied, raw, DT)
+        hips, knees = cpg.step(applied, raw, DT, roll=roll, pitch=pitch)
         for j in range(4):
             a_id, h_id, k_id = joint_IDs_full[LEG_NAMES[j]]
             p.setJointMotorControl2(robot, a_id, p.POSITION_CONTROL,
@@ -375,6 +376,8 @@ def _job(args):
     f2s._limit_threads()
     seed, method, k_sigma, incumbent, trigger, dt_move = args
     f2s.DT_BUDGET_MOVE = float(dt_move)            # picked up by the DT monitor
+    from methods.marxefe_optimizer import JointCPG   # attitude-feedback ablation
+    JointCPG.ATTITUDE_FEEDBACK = os.environ.get("CPG_ATTITUDE_FB", "1") != "0"
     from methods import terrain
     from methods.cpg_bounds import bounds_lower as bl, bounds_upper as bu
     box = (bl.numpy(), bu.numpy())
@@ -459,7 +462,10 @@ def main():
     ap.add_argument("--dt-move", type=float, default=DT_BUDGET_MOVE,
                     help="dt only: reference gait move (fraction of param range)")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--no-attitude-fb", action="store_true",
+                    help="disable the CPG's VMC body-attitude feedback (ablation)")
     args = ap.parse_args()
+    os.environ["CPG_ATTITUDE_FB"] = "0" if args.no_attitude_fb else "1"
     run(args.seeds, args.arms, args.K, args.workers,
         trigger=args.trigger, dt_move=args.dt_move)
 

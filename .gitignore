@@ -10,3 +10,5 @@
 # local
 *__pycache__
 archive/
+literature/
+*/results/

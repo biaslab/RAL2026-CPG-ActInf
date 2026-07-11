@@ -592,6 +592,7 @@ def run_trial(seed, slope_deg, method_name, k_sigma, incumbent, oracle_params, b
     n_pauses = 0
     adapt_windows = 0
     propose_times = []
+    roll = pitch = 0.0            # previous-step trunk attitude for CPG feedback
 
     for k in range(n_steps):
         t = k * DT
@@ -637,7 +638,7 @@ def run_trial(seed, slope_deg, method_name, k_sigma, incumbent, oracle_params, b
         raw = np.array([int(len(p.getContactPoints(
             bodyA=0, bodyB=robot, linkIndexA=-1, linkIndexB=feet[j])) > 0)
             for j in range(4)])
-        hips, knees = cpg.step(applied, raw, DT)
+        hips, knees = cpg.step(applied, raw, DT, roll=roll, pitch=pitch)
         for j in range(4):
             a_id, h_id, k_id = joint_IDs_full[LEG_NAMES[j]]
             p.setJointMotorControl2(robot, a_id, p.POSITION_CONTROL,
@@ -781,8 +782,17 @@ def scalar_metrics(res):
     return d
 
 
-def run_path(slope_deg, seed, method, trigger="ce"):
+def _cond_suffix(trigger):
+    """Filename suffix distinguishing trigger and attitude-feedback condition, so
+    the CE/DT x feedback-on/off runs write to separate files."""
     suffix = "" if trigger == "ce" else f"_{trigger}"
+    if os.environ.get("CPG_ATTITUDE_FB", "1") == "0":
+        suffix += "_noafb"
+    return suffix
+
+
+def run_path(slope_deg, seed, method, trigger="ce"):
+    suffix = _cond_suffix(trigger)
     return os.path.join(RUNS_DIR, f"slope{slope_deg:g}_seed{seed}_{method}{suffix}.npz")
 
 
@@ -793,6 +803,8 @@ def _job(args):
     slope_deg, seed, method, k_sigma, incumbent, oracle, trigger, dt_move = args
     global DT_BUDGET_MOVE
     DT_BUDGET_MOVE = float(dt_move)          # picked up by DecisionTheoreticMonitor
+    from methods.marxefe_optimizer import JointCPG   # attitude-feedback ablation
+    JointCPG.ATTITUDE_FEEDBACK = os.environ.get("CPG_ATTITUDE_FB", "1") != "0"
     from methods.cpg_bounds import bounds_lower as bl, bounds_upper as bu
     box = (bl.numpy(), bu.numpy())
     res = run_trial(seed, slope_deg, method, k_sigma, incumbent, oracle, box,
@@ -812,10 +824,10 @@ def run(slopes, seeds, arms, k_sigma, workers, trigger="ce", dt_move=DT_BUDGET_M
     # the returned ratio is 1.0 (K is only the CE-ratio threshold).
     k_eff = 1.0 if trigger == "dt" else float(k_sigma)
     tau = 8 * (4.0 * dt_move / CONTROL_PRIOR_SCALE) ** 2
-    suffix = "" if trigger == "ce" else f"_{trigger}"
-    manifest = MANIFEST_CSV if trigger == "ce" else os.path.join(
+    suffix = _cond_suffix(trigger)
+    manifest = MANIFEST_CSV if suffix == "" else os.path.join(
         RESULTS_DIR, f"manifest{suffix}.csv")
-    config = CONFIG_JSON if trigger == "ce" else os.path.join(
+    config = CONFIG_JSON if suffix == "" else os.path.join(
         RESULTS_DIR, f"config{suffix}.json")
 
     print(f"flat-optimal (incumbent): {np.round(incumbent, 3).tolist()}")
@@ -879,7 +891,10 @@ def main():
                     help="dt only: reference gait move (fraction of param range) "
                          "whose control cost sets the threshold tau")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--no-attitude-fb", action="store_true",
+                    help="disable the CPG's VMC body-attitude feedback (ablation)")
     args = ap.parse_args()
+    os.environ["CPG_ATTITUDE_FB"] = "0" if args.no_attitude_fb else "1"
     run(args.slopes, args.seeds, args.arms, args.K, args.workers,
         trigger=args.trigger, dt_move=args.dt_move)
 

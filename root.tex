@@ -111,13 +111,10 @@ In the following, we contribute
     \item by benchmarking this agent against offline grid search and online Bayesian optimization.
 \end{itemize}
 
-
-
-\clearpage
 \section{PROBLEM STATEMENT}
 
-We first describe the base platform whose motion defines the locomotion objective, and then the central pattern generator that produces the coordinated leg motion driving it.
-We then argue that the parameters yielding stable locomotion depend on the terrain, so that a parameter set tuned for one terrain degrades once the terrain changes.
+We first describe the base platform whose motion defines the locomotion objective, and then the controller driving it: a central pattern generator that produces the coordinated leg motion, augmented with an attitude virtual model controller that reactively corrects posture deviations.
+We then argue that, even with this reactive posture loop, the parameters yielding stable locomotion depend on the terrain, so that a parameter set tuned for one terrain degrades once the terrain changes.
 This motivates online adaptation of the parameters as a requirement for resuming stable locomotion.
 
 \subsection{Base platform and locomotion objective}
@@ -156,9 +153,11 @@ Concretely, we require the trunk to maintain a target forward velocity $v^\star$
   \label{eq:locomotion-objective}
 \end{align}
 Because $f$ is unknown, these torques cannot be solved for from a model directly.
-Instead, a central pattern generator produces rhythmic joint-angle references that a joint-level controller tracks through torques, shaping the base motion toward the objective, which we introduce next.
+Instead, a central pattern generator produces rhythmic joint-angle references, an attitude virtual model controller adjusts these references to counter posture deviations, and joint-level position controllers track the result through torques, shaping the base motion toward the objective.
+We introduce both components next.
 
 \subsection{Central Pattern Generator}
+\label{sec:cpg}
 
 The CPGs are modeled as a network of four mutually coupled Hopf oscillators, each driving one limb: left front (LF), right front (RF), left hind (LH), and right hind (RH). Coordination between limbs arises from inhibitory coupling through a gait-specific coupling matrix $K = [k_{ij}]$.
 Let $\omega_i$ be the balance between stance and swing frequencies, operationalized as
@@ -167,25 +166,48 @@ Let $\omega_i$ be the balance between stance and swing frequencies, operationali
 \end{equation}
 with $\varsigma(\cdot)$ a sigmoid function. Then, the oscillators evolve as
 \begin{align}
-  \dot{x}_i &= \alpha\,(u - r_i^2)\,x_i - \omega_i\,y_i, \\
+  \dot{x}_i &= \alpha\,(u - r_i^2)\,x_i - \omega_i\,y_i \,, \\
   \dot{y}_i &= \beta\,(u - r_i^2)\,y_i + \omega_i\,x_i
-               + \gamma \sum_{j=1}^4 k_{ij}\,y_j + s_i, \label{eq:ydot} \, ,
+               + \gamma \sum_{j=1}^4 k_{ij}\,y_j + s_i \,, \label{eq:ydot}
 \end{align}
-where $r_i = \sqrt{x_i^2 + y_i^2}$ is the instantaneous amplitude, $u$ defines the squared amplitude of the limit cycle, and $\alpha, \beta > 0$ are convergence rates (typically $\beta \gg \alpha$ to enforce stronger convergence along the $y$-axis). The term $\omega_i$ transitions between the stance and swing frequencies depending on the phase $y_i$, and $\gamma$ is the coupling gain added to have stronger coupling and less dependency on the initial conditions settings. The sigmoid functions in Equation \ref{Equation 3} ensure smooth and continuous transition between the stance and swing frequencies. A sigmoid is an S-shaped mathematical function that smoothly interpolates between two values; in this context, it gradually shifts the oscillator’s frequency based on the sign and magnitude of $y_i$. the parameter $b$ sets the sharpness between this transition. This allows the oscillator to gradually change between the swing and the stance phases according to the sign and magnitude of $y_i$. 
-The coupling matrix $K = [k_{ij}]$ is gait-specific.
-
+where $r_i = \sqrt{x_i^2 + y_i^2}$ is the instantaneous amplitude, $u$ defines the squared amplitude of the limit cycle, and $\alpha, \beta > 0$ are convergence rates (typically $\beta \gg \alpha$ to enforce stronger convergence along the $y$-axis).
+The term $\omega_i$ of Eq.~\ref{eq:omega_i} transitions between the stance and swing frequencies depending on the phase $y_i$: the sigmoid $\varsigma$ smoothly interpolates between the two frequencies according to the sign and magnitude of $y_i$, with the parameter $b$ setting the sharpness of this transition.
+The coupling gain $\gamma$ strengthens the coordination between the limbs and reduces the dependence on initial conditions; the coupling matrix $K = [k_{ij}]$ is gait-specific.
 
 % Different gaits emerge from the choice of the coupling matrix. Figure~\ref{fig:coupling_matrices} illustrates the matrices for trot, pace, bound, and walk, each defining a distinct set of stable phase relationships.
 %
-%
-Figure \ref{fig:CPGoutputs}  shows the time evolution of the outputs from the Hopf CPG model and the joint angles for the walking gait simulation. The CPGs demonstrate the expected sinusoidal movement for each leg. Figure~\ref{fig:hopf_limit_cycle} shows the limit cycle behavior of the CPG, where the state variables \( x_i \) and \( y_i \) converge to a circular trajectory of radius \( \sqrt{\mu} \) and closely follow this limit cycle over time. This demonstrates the oscillator's stability and periodicity, which are critical for generating smooth, consistent joint trajectories necessary for coordinated legged locomotion.
+The term $s_i$ closes a feedback loop on foot-contact timing \cite{righetti2008pattern}.
+Leg $i$ is classified as swinging when $y_i$ exceeds a small positive threshold and as in stance below a small negative one, with a hysteresis band in between.
+Comparing this phase against the binary contact state of foot $i$ yields
+\begin{align}
+  s_i =
+  \begin{cases}
+    K_{\text{stop}} \big( \omega_i x_i - \gamma \sum_{j} k_{ij} y_j \big) & \text{contact matches phase} \\
+    F_{\text{fast}} \operatorname{sign}(y_i) & \text{otherwise}
+  \end{cases}
+  \label{eq:feedback}
+\end{align}
+and $s_i = 0$ inside the hysteresis band.
+The contact matches the phase when the foot is airborne during swing or loaded during stance; it contradicts the phase upon an early touchdown or an unexpected loss of ground contact.
+The gains $K_{\text{stop}}$ and $F_{\text{fast}}$ set how strongly the sensed footfalls reshape the nominal rhythm, synchronizing the oscillators to the actual contact events.
+
+The oscillator states map to joint-angle references,
+\begin{align}
+  \varphi^{\text{hip}}_i \! = \! \varphi^{\text{hip}}_0 \! + \! A_{\text{hip}}\, x_i , \ \,
+  \varphi^{\text{knee}}_i \! \! = \! \varphi^{\text{knee}}_0 \! \! - \! A_{\text{knee}} \max(0, y_i) \! + \! \Delta_i ,
+  \label{eq:joint-map}
+\end{align}
+where $\varphi^{\text{hip}}_0, \varphi^{\text{knee}}_0$ are the joint offsets of the standing pose and $A_{\text{hip}}, A_{\text{knee}}$ are the swing amplitudes.
+During swing ($y_i > 0$) the knee flexes to lift the foot while the hip advances with $x_i$; during stance the knee holds its nominal extension.
+The term $\Delta_i$ is the posture correction supplied by the virtual model controller of Section~\ref{sec:vmc}, and is zero for the open-loop CPG.
+Joint-level position controllers track these references, producing the joint torques $\tau$ of Eq.~\ref{eq:base-to-joints}.
 
 The behavior of the CPG is governed by a small set of parameters, collected in the vector
 \begin{align}
     \theta = [\gamma, \omega_{\text{swing}}, \omega_{\text{stance}}, F_{\text{fast}}, K_{\text{stop}}, A_{\text{hip}}, A_{\text{knee}}, b] \,,
     \label{eq:cpg-parameters}
 \end{align}
-comprising the coupling gain, the phase-dependent stance and swing frequencies, the fast-contact gain $F_{\text{fast}}$ and stop gain $K_{\text{stop}}$ of the sensory feedback (Eq.~\ref{eq:feedback}), the hip and knee amplitudes, and the sigmoid sharpness $b$ of Eq.~\ref{eq:omega_i}.
+comprising the coupling gain, the phase-dependent stance and swing frequencies, the fast-contact gain $F_{\text{fast}}$ and stop gain $K_{\text{stop}}$ of the contact feedback (Eq.~\ref{eq:feedback}), the hip and knee amplitudes of Eq.~\ref{eq:joint-map}, and the sigmoid sharpness $b$ of Eq.~\ref{eq:omega_i}.
 These parameters set the gait shape, and are held fixed during locomotion.
 
 % \begin{figure}[htbp]
@@ -195,9 +217,42 @@ These parameters set the gait shape, and are held fixed during locomotion.
 %     \label{fig:hopf_limit_cycle}
 % \end{figure}
 
+\subsection{Attitude Virtual Model Control}
+\label{sec:vmc}
+
+The contact feedback of Eq.~\ref{eq:feedback} synchronizes the rhythm to the footfalls, but no part of the controller so far senses the trunk attitude.
+Yet roll and pitch deviations are precisely what drive the robot toward a fall (Eq.~\ref{eq:locomotion-objective}): on uneven or sloped ground the rhythmic pattern induces unwanted body rotations that it cannot itself correct.
+Virtual Model Control (VMC) addresses this by imagining virtual components, such as springs and dampers, attached to the robot and computing the joint actions that would arise if these components physically existed \cite{pratt2001virtual}.
+Ajallooeian et al.~\cite{ajallooeian2013central} augment a quadruped CPG with virtual springs spanning a trunk-fixed plane and a horizontal reference plane, so that the resulting virtual forces at the stance feet continually pull the trunk level.
+
+We adopt this construction in a kinematic form suited to position-controlled joints.
+A virtual spring-damper on each attitude angle produces the correction commands
+\begin{align}
+  c_r &= -\big( \kappa^{r}_{p}\, \psi_r + \kappa^{r}_{d}\, \dot{\psi}_r \big) \,, \label{eq:vmc-roll} \\
+  c_p &= -\big( \kappa^{p}_{p}\, (\psi_p - \bar{\psi}_p) + \kappa^{p}_{d}\, \dot{\psi}_p \big) \,, \label{eq:vmc-pitch}
+\end{align}
+where the $\kappa$'s are stiffness and damping gains.
+The roll is regulated toward zero, since straight walking involves no sustained bank and lateral tip-over is the dominant fall mode.
+The pitch is regulated toward a slowly adapting baseline $\bar{\psi}_p$, an exponential moving average of the recent pitch with a time constant on the order of one second, so that transient rocking is damped while the sustained pitch offset imposed by an incline is tolerated rather than fought.
+The commands are distributed over the legs as the knee corrections of Eq.~\ref{eq:joint-map},
+\begin{align}
+  \Delta_i = \operatorname{clip}\big( \sigma^{F}_i\, c_p + \sigma^{L}_i\, c_r ,\; \pm \delta_{\max} \big) \,,
+  \label{eq:vmc-distribution}
+\end{align}
+where $\sigma^{F}_i = +1$ for the front legs and $-1$ for the hind legs, $\sigma^{L}_i = +1$ for the left legs and $-1$ for the right legs, and $\delta_{\max}$ bounds the correction.
+Adjusting a knee angle changes the effective leg length, so Eq.~\ref{eq:vmc-distribution} realizes the virtual springs of Ajallooeian et al.~\cite{ajallooeian2013central} through the position-controlled knees: the legs on a sinking side of the trunk extend to push that corner back up, while the legs on the rising side shorten.
+
+The VMC gains are held at fixed, hand-tuned values and are not part of the parameter vector $\theta$.
+The attitude loop thus acts at a fast timescale, correcting momentary posture deviations within a stride, but it leaves the rhythmic pattern itself untouched.
+Ajallooeian et al.~\cite{ajallooeian2013central} observe that such momentary corrections lose effectiveness as the terrain becomes more difficult, when the attitude corrections begin to work against the forward progression planned by the CPG.
+Whether locomotion remains stable therefore still hinges on the gait parameters $\theta$ matching the terrain, which we examine next.
+
+\subsection{Terrain Dependence of the Optimal Parameters}
+\label{sec:terrain-dependence}
+
 For a fixed terrain, the parameter vector $\theta$ can be tuned to produce stable locomotion.
 Let $e$ denote the terrain.
-Running the CPG with parameters $\theta$ on terrain $e$ induces a distribution $p(\xi \given \theta, e)$ over the base state, which we score by the locomotion objective of Eq.~\ref{eq:locomotion-objective},
+Running the controller with parameters $\theta$ on terrain $e$, with the attitude feedback of Section~\ref{sec:vmc} active, induces a distribution $p(\xi \given \theta, e)$ over the base state, which we score by the locomotion objective of Eq.~\ref{eq:locomotion-objective},
 \begin{align}
     V(\theta, e) = - \mathbb{E}_{p(\xi \given \theta, e)} \Big[ \frac{1}{v^\star} \big\lVert v - v^\star \big\rVert + \frac{1}{\psi_0} \big\lVert (\psi_r, \psi_p) \big\rVert \Big] \,,
     \label{eq:criterion}
@@ -226,7 +281,7 @@ The cost of the mismatch grows with exposure: on a single transition it is trans
 %\label{fig:terrain-optima}
 %\end{figure}
 
-Because $\theta$ is held fixed, a change in terrain leaves the controller at a now-suboptimal point $\theta^{\star}(e_{\text{old}}) \neq \theta^{\star}(e_{\text{new}})$, and the resulting attitude deviations compound: as the trunk tilts away from balance, recovery demands larger corrections, and locomotion can fail before the new terrain is traversed.
+Because $\theta$ is held fixed, a change in terrain leaves the controller at a now-suboptimal point $\theta^{\star}(e_{\text{old}}) \neq \theta^{\star}(e_{\text{new}})$, and the resulting attitude deviations compound: as the trunk tilts away from balance, recovery demands corrections beyond what the bounded attitude feedback of Eq.~\ref{eq:vmc-distribution} can supply, and locomotion can fail before the new terrain is traversed.
 Fig.~\ref{fig:noadapt} shows a representative bout: after the transition, holding the flat-optimal parameters lets the tilt run away past the fall threshold and the robot topples, whereas switching to the incline-optimal parameters keeps the tilt near the incline baseline and the robot climbs steadily.
 Resuming stable locomotion after a terrain change therefore requires detecting that the terrain has changed and re-tuning $\theta$ toward $\theta^{\star}(e_{\text{new}})$ online, quickly enough to preserve balance.
 
@@ -313,6 +368,7 @@ An event fires when the smoothed statistic exceeds $K$ for $P$ consecutive steps
 Symmetrically, adaptation is paused whenever the statistic returns below $K$, so re-tuning runs only while the incumbent is provably suboptimal.
 
 \section{EXPERIMENTS}
+\label{sec:experiments}
 
 We evaluate three parameter-selection strategies for the Hopf-oscillator CPG controller on the Laikago quadruped in PyBullet: (i) an offline \emph{grid search} over a small set of CPG parameters; (ii) online \emph{Bayesian optimization} (BO) with a Gaussian-process surrogate and a UCB acquisition function; and (iii) the proposed \emph{MARX-EFE} active inference agent, which continually updates CPG parameters by minimising expected free energy. Grid search serves as a fixed, non-adaptive reference point, BO serves as a state-of-the-art black-box optimizer, and MARX-EFE is the proposed continual learning agent.
 
@@ -320,7 +376,7 @@ All three methods optimize in the same 8-dimensional parameter space with identi
 \begin{align*}
     \theta = [\gamma, \omega_{\mathrm{swing}}, \omega_{\mathrm{stance}}, F_{\mathrm{fast}}, K_{\mathrm{stop}}, A_{\mathrm{hip}}, A_{\mathrm{knee}}, b]\,,
 \end{align*}
-corresponding to the coupling gain, the two phase-dependent frequencies, the Righetti-style fast-contact gain, the stop-gain, the hip and knee amplitudes, and the sigmoid sharpness $b$ from Eq.~\ref{Equation 3}. Each trial is a $T=4.5$\,s episode of simulated walking on flat ground with $\Delta t = 0.01$\,s, a $1.5$\,s settling window excluded from the metrics, and a target forward velocity of $1.0$\,m/s. Parameter updates occur \emph{online}: every trial carries the CPG state forward and smoothly interpolates between the previous and new parameters over the first $150$ steps.
+corresponding to the coupling gain, the two phase-dependent frequencies, the Righetti-style fast-contact gain, the stop-gain, the hip and knee amplitudes, and the sigmoid sharpness $b$ from Eq.~\ref{eq:omega_i}. Each trial is a $T=4.5$\,s episode of simulated walking on flat ground with $\Delta t = 0.01$\,s, a $1.5$\,s settling window excluded from the metrics, and a target forward velocity of $1.0$\,m/s. Parameter updates occur \emph{online}: every trial carries the CPG state forward and smoothly interpolates between the previous and new parameters over the first $150$ steps.
 
 \paragraph{Performance metrics}
 We score each method on four quantities computed over the $3.0$\,s steady-state window: the scalar objective
@@ -475,6 +531,54 @@ Mean $\bar{V}$       & $0.22$ & $0.44$        & $-0.46$ & $-0.53$ & $0.27$ & $0.
 \bottomrule
 \end{tabular}
 \end{table}
+
+\subsection{Natural terrain}
+\label{sec:exp-natural}
+
+The transitions so far are between two known surfaces with pre-computed optima, which lets an oracle mark the achievable ceiling.
+A natural landscape offers no such reference: the ground changes in both friction and geometry many times along the path, and the parameter optimum drifts continuously, so there is no single terrain-matched gait to switch to.
+We therefore replace the two-surface corridor with a natural transect of forward bands of grass, gravel, rock, and shallow water in random order and length, each band carrying its own friction and its own micro-geometry: gentle undulation on grass, fine roughness on gravel, scattered low rocks to step over, and a slippery depression at the water.
+Bands are $6$ to $10$\,m long, so each surface persists for $12$ to $20$\,s of walking, and the robot walks a single continuous bout of up to $80$\,s rather than resetting after one transition.
+It starts on grass with $\theta^{\star}(\text{flat})$, whose friction $\mu \approx 0.7$ makes the flat optimum the natural incumbent, and adapts online whenever the optimality monitor fires.
+The monitor re-arms after each band as on the repeated-ramp corridor of Section~\ref{sec:exp-results}, so a single run triggers once per transition it deems significant, on average $1.5$ times over the bout.
+Because there is no oracle, and almost every gait eventually falls on a long enough transect, the discriminating metric is the \emph{survival distance}, the distance walked before a fall or the end of the terrain.
+We report it alongside the fall rate, the number of bands crossed, the mean trunk tilt $\sqrt{\psi_r^2 + \psi_p^2}$ after the baseline window, and the mean windowed criterion $\bar{V}$, over $N = 10$ sampled transects.
+
+\begin{table}[t]
+\centering
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.1}
+\caption{Online adaptation on a natural transect of friction and geometry bands ($N = 10$ sampled transects, decision-theoretic trigger). There is no oracle, because the optimum drifts along the path. Survival distance and bands crossed are higher-is-better; fall rate and trunk tilt are lower-is-better; $\bar{V}$ is higher-is-better. Best online method in bold.}
+\label{tab:natural}
+\begin{tabular}{lcccc}
+\toprule
+ & reference & \multicolumn{3}{c}{online method} \\
+\cmidrule(lr){2-2}\cmidrule(lr){3-5}
+Metric & no adapt & grid & BO & MARX-EFE \\
+\midrule
+Distance [m]     & $34.2$  & $32.9$  & $33.2$  & $\mathbf{34.3}$ \\
+Falls [\%]       & $50$    & $60$    & $60$    & $\mathbf{40}$ \\
+Bands crossed    & $4.7$   & $4.5$   & $4.5$   & $4.6$ \\
+Trunk tilt [deg] & $2.2$   & $2.3$   & $2.3$   & $\mathbf{2.2}$ \\
+Mean $\bar{V}$   & $-0.27$ & $-0.50$ & $-0.43$ & $\mathbf{-0.31}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The natural transect echoes the two-surface findings (Table~\ref{tab:natural}).
+Survival distances overlap across all arms, from $33$ to $34$\,m with a per-seed spread of about $11$\,m that reflects where the first fall happens, so distance alone does not separate the methods.
+The fall rate and the windowed criterion do, and they order the arms consistently.
+Online black-box search is again the most fragile: grid and BO fall in $60\%$ of runs against $50\%$ for no adaptation, and their mean criterion is the lowest ($-0.50$ and $-0.43$ against $-0.27$), because a speculative candidate walked on a low-friction or uneven band tips the robot just as it did on the incline.
+MARX-EFE is the only arm to improve on holding the incumbent, falling in $40\%$ of runs while matching no adaptation on trunk tilt and criterion.
+This mirrors its behavior on the single and repeated inclines: it selects small model-guided corrections rather than committing whole windows to physical trials, which avoids the destabilization that black-box search causes.
+The small sample leaves these orderings short of statistical significance, but their direction matches the two-surface experiments and holds once the bands are long enough to expose a mismatched gait for a sustained stretch.
+
+%\begin{figure}[t]
+%\centering
+%\includegraphics[width=\linewidth]{experiment-natural-adapt/results/figures/summary_dt.png}
+%\caption{Online CPG adaptation over a natural transect ($10$ seeds, decision-theoretic trigger). Bars over seeds for survival distance, fall rate, bands crossed, forward speed, and trunk tilt. MARX-EFE (orange) falls least and tracks the target speed as tightly as no adaptation (gray), while grid (green) and BO (blue) fall most.}
+%\label{fig:natural}
+%\end{figure}
 
 \subsection{Experiment 2: Sensitivity to exploration schedule}
 \label{sec:exp2-beta}
