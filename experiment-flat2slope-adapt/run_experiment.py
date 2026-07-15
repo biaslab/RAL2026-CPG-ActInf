@@ -102,7 +102,23 @@ K_DEFAULT = 2.0           # trigger threshold on the baseline-normalised ratio
 # the exact role the CE ratio-to-baseline plays, so the squash logic is unchanged
 # (with the effective threshold = 1.0).
 CONTROL_PRIOR_SCALE = 0.15   # monitor control-prior width (price of adapting)
+MARX_CONTROL_PRIOR_SCALE = 0.15  # MarxEFE selection: control-prior width (pull
+                                 # toward the incumbent); sigma = scale*range/4.
+                                 # Overridable per experiment (module attribute).
+MARX_GOAL_VEL_STD = MON_VEL_STD  # MarxEFE selection ONLY: goal-prior std on
+                                 # vx,vy. Kept separate from MON_VEL_STD so an
+                                 # experiment can tighten the method's velocity
+                                 # goal without altering the trigger statistic.
 DT_BUDGET_MOVE = 0.02        # reference gait move (fraction of each param's range)
+
+# CUSUM variant of the decision-theoretic trigger (see CusumDecisionMonitor): the
+# recoverable value lambda^2/tau is a per-step rate of value forgone by not
+# adapting; the CUSUM accumulates it net of a tolerated baseline rate DT_CUSUM_SLACK
+# and fires when the running sum crosses DT_CUSUM_H, so a SUSTAINED (transition)
+# suboptimality accumulates and fires early while transient spikes / good-terrain
+# noise do not. Units are fractions of the control-cost budget tau.
+DT_CUSUM_SLACK = 0.10        # tolerated per-step suboptimality (kappa), in tau units
+DT_CUSUM_H = 5.0             # CUSUM decision bound (h), in tau units
 
 ARMS_DEFAULT = ["noadapt", "oracle", "grid", "bo", "marxefe"]
 
@@ -348,6 +364,77 @@ class DecisionTheoreticMonitor:
         return float(self.ema_log[k] / self.tau)
 
 
+class CusumDecisionMonitor(DecisionTheoreticMonitor):
+    """Decision-theoretic suboptimality trigger with a CUSUM decision rule.
+
+    Same Newton-decrement lambda^2 as DecisionTheoreticMonitor (the goal cross-
+    entropy that re-tuning the incumbent could recover), but instead of firing
+    when the instantaneous EMA(lambda^2) exceeds the one-shot control-cost budget
+    tau, it accumulates the recoverable value over time. Reading lambda^2/tau as
+    the per-step rate of value forgone by holding the incumbent, the running sum
+
+        S_k = max(0, S_{k-1} + (lambda^2_k / tau - kappa)),   fire when S_k > h,
+
+    is the cumulative benefit of adapting net of a tolerated baseline rate kappa
+    (DT_CUSUM_SLACK); it fires once that exceeds the decision bound h (DT_CUSUM_H).
+    This is Page's sequential change detector applied to the optimality statistic:
+    a SUSTAINED transition suboptimality (e.g. stepping onto a lower-friction band,
+    where lambda^2 rises modestly for seconds) accumulates and fires early, while a
+    transient one-step spike (a stumble) or good-terrain noise does not. On a truly
+    un-recoverable surface (near-frictionless ice collapses the control gain, so
+    lambda^2 stays low) it correctly stays silent.
+
+    The lambda^2 / EMA / ctrl logs are inherited unchanged; only the fire/arm rule
+    differs. `_baseline_mean` is redefined to tau*kappa so the shared squash logic
+    (pause once the windowed ratio falls back below its threshold) pauses when the
+    instantaneous suboptimality returns to the tolerated slack kappa."""
+
+    def __init__(self, n_steps, k_sigma, dt_move=None, control_prior_scale=None,
+                 cusum_slack=None, cusum_h=None):
+        super().__init__(n_steps, k_sigma, dt_move, control_prior_scale)
+        self.kappa = DT_CUSUM_SLACK if cusum_slack is None else float(cusum_slack)
+        self.h = DT_CUSUM_H if cusum_h is None else float(cusum_h)
+        self.S = 0.0
+        self.s_log = np.zeros(n_steps)        # CUSUM statistic trace
+
+    def step(self, k, t, y_new, applied):
+        lam2, ctrl = 0.0, 0.0
+        if self.agent.n_updates > WARMUP_UPDATES:
+            try:
+                lam2, ctrl = self._lambda2(applied)
+            except Exception:
+                lam2, ctrl = 0.0, 0.0
+        self.agent.update(y_new, applied)
+        self.ema = lam2 if k == 0 else (1 - EMA_ALPHA) * self.ema + EMA_ALPHA * lam2
+        self.c_log[k] = lam2
+        self.ema_log[k] = self.ema
+        self.ctrl_log[k] = ctrl
+
+        r = self.ema / self.tau                        # recoverable value, tau units
+        if t >= ARM_TIME:
+            if self.armed:
+                self.S = max(0.0, self.S + (r - self.kappa))   # accumulate net of slack
+                if self.S > self.h:
+                    self.fire_steps.append(k)
+                    self.armed = False
+                    self.S = 0.0                        # reset accumulator on fire
+                    if not self.fired:
+                        self.fired = True
+                        self.fire_step = k
+            else:
+                # disarmed: hold the accumulator down until the recoverable value
+                # falls back to the tolerated baseline (suboptimality squashed),
+                # then re-arm so the next transition can re-fire.
+                self.S = 0.0
+                if r < self.kappa:
+                    self.armed = True
+        self.s_log[k] = self.S
+        return self.fired
+
+    def _baseline_mean(self):
+        return self.tau * self.kappa          # squash threshold = tolerated slack
+
+
 # ── Online adaptation methods ────────────────────────────────────────────────
 
 class NoAdapt:
@@ -458,10 +545,11 @@ class MarxEFE(NoAdapt):
     def __init__(self, incumbent, oracle_params, box, seed):
         from methods.marxefe_optimizer import build_marx_agent
         np.random.seed(1)
-        goal_std = (MON_VEL_STD, MON_VEL_STD,
+        goal_std = (MARX_GOAL_VEL_STD, MARX_GOAL_VEL_STD,
                     np.deg2rad(MON_PITCH_DEG), np.deg2rad(MON_ROLL_DEG))
         self.agent = build_marx_agent(
-            target_velocity=TARGET_VX, control_prior_scale=0.15,
+            target_velocity=TARGET_VX,
+            control_prior_scale=MARX_CONTROL_PRIOR_SCALE,
             goal_prior_std=goal_std, time_horizon=2, forgetting=self.FORGETTING)
         self.agent.μ = np.asarray(incumbent, float).copy()   # prior = current gait
         lo, hi = box

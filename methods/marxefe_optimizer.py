@@ -664,6 +664,11 @@ class JointCPG:
         self.prev_pitch = 0.0
         self.pitch_ema = 0.0
         self._att_init = False
+        # attitude-feedback gains as instance state, so they can be adapted online
+        # (default to the validated class constants); order [kp_roll, kd_roll,
+        # kp_pitch, kd_pitch]. Set via set_gains().
+        self.kp_roll, self.kd_roll = self.KP_ROLL, self.KD_ROLL
+        self.kp_pitch, self.kd_pitch = self.KP_PITCH, self.KD_PITCH
         self.phase = []
         for j in range(n_legs):
             if self.y[j] > self.SWING_ENTER:
@@ -744,12 +749,27 @@ class JointCPG:
             self.prev_roll, self.prev_pitch = roll, pitch
             self.pitch_ema += self.ATT_EMA_ALPHA * (pitch - self.pitch_ema)
             d_pitch = pitch - self.pitch_ema             # tolerate steady incline
-            roll_cmd = self.ROLL_SIGN * (self.KP_ROLL * roll + self.KD_ROLL * roll_rate)
-            pitch_cmd = self.PITCH_SIGN * (self.KP_PITCH * d_pitch + self.KD_PITCH * pitch_rate)
+            roll_cmd = self.ROLL_SIGN * (self.kp_roll * roll + self.kd_roll * roll_rate)
+            pitch_cmd = self.PITCH_SIGN * (self.kp_pitch * d_pitch + self.kd_pitch * pitch_rate)
             dknee = np.clip(self._FRONT * pitch_cmd + self._LEFT * roll_cmd,
                             -self.DKNEE_CLIP, self.DKNEE_CLIP)
             knee_angles = knee_angles + dknee
         return hip_angles, knee_angles
+
+    def set_gains(self, gains):
+        """Set the 4 attitude-feedback gains [kp_roll, kd_roll, kp_pitch, kd_pitch].
+        The online-adaptable channel (continuous, no gait-phase discontinuity)."""
+        self.kp_roll, self.kd_roll, self.kp_pitch, self.kd_pitch = \
+            (float(g) for g in gains)
+
+
+# Default and bounds for the 4 attitude-feedback gains (the adaptable channel):
+# [kp_roll, kd_roll, kp_pitch, kd_pitch]. Proportional gains dominate; derivative
+# gains are kept small (rate noise). Bounds bracket the validated defaults.
+GAIN_DEFAULT = np.array([JointCPG.KP_ROLL, JointCPG.KD_ROLL,
+                         JointCPG.KP_PITCH, JointCPG.KD_PITCH])
+GAIN_LOWER = np.array([0.0, 0.0, 0.0, 0.0])
+GAIN_UPPER = np.array([3.0, 0.30, 3.0, 0.30])
 
 
 def reset_simulation(p, robot, filtered_joint_IDs, ori_default):

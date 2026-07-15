@@ -85,6 +85,7 @@ BASELINE_T = f2s.BASELINE_T
 ADAPT_T = f2s.ADAPT_T                       # kept only for the safeguard warm score
 TriggerMonitor = f2s.TriggerMonitor
 DecisionTheoreticMonitor = f2s.DecisionTheoreticMonitor
+CusumDecisionMonitor = f2s.CusumDecisionMonitor
 Safeguard = f2s.Safeguard
 j_stab_window = f2s.j_stab_window
 _reset_with_jitter = f2s._reset_with_jitter
@@ -93,7 +94,11 @@ DT_BUDGET_MOVE = f2s.DT_BUDGET_MOVE
 
 # Natural online arms: drop the (ill-defined) oracle; keep the searchers + anchor.
 METHODS = {n: f2s.METHODS[n] for n in ("noadapt", "grid", "bo", "marxefe")}
+# `oracle` is not a searcher (it has no method object); it is the clairvoyant
+# per-band reference handled directly in run_trial. It is a valid arm but is kept
+# out of METHODS (which maps arm -> searcher class).
 ARMS_DEFAULT = ["noadapt", "grid", "bo", "marxefe"]
+ALL_ARMS = ARMS_DEFAULT + ["oracle"]
 
 RESULTS_DIR = os.path.join(_HERE, "results")
 RUNS_DIR = os.path.join(RESULTS_DIR, "runs")
@@ -112,9 +117,32 @@ DURATION = 80.0            # hard cap on the continuous bout [s]
 REACH = 45.0             # forward extent of the sampled transect [m]
 BAND_LEN = (6.0, 10.0)    # per-band length range [m]
 START_GRASS = 4.0         # opening grass run before the first transition [m]
-Z_FALL = 0.22             # absolute base height below which we call a fall [m]
+CLEAR_FALL = 0.22         # base clearance above local ground below which = fall [m]
 UPRIGHT_FALL = 0.30       # world-up . body-up below which we call a tip-over
 END_MARGIN = 1.0          # stop as "reached end" this far before REACH [m]
+
+
+def load_surface_optima():
+    """{surface -> 8-vector} of the per-band CPG optima fit by fit_surface_oracles.py.
+    Falls back to the incumbent for any surface without an entry."""
+    import json as _json
+    path = os.path.join(RESULTS_DIR, "surface_optima.json")
+    if not os.path.exists(path):
+        raise SystemExit("surface_optima.json not found; run fit_surface_oracles.py "
+                         "before the oracle arm")
+    d = _json.load(open(path))
+    return {surf: np.asarray(v["params"], float) for surf, v in d.items()}
+
+
+def _surface_at(bands, y):
+    """Surface name of the band the robot is currently on (forward position y)."""
+    nm = bands[0][1]
+    for yb, b in bands:
+        if y >= yb:
+            nm = b
+        else:
+            break
+    return str(nm)
 
 
 def load_incumbent():
@@ -122,23 +150,33 @@ def load_incumbent():
         return np.asarray(json.load(f)["params"], float)
 
 
-def _fallen_natural(base_pos, base_ori, p):
-    """Natural-terrain fall check. The band geometry is shallow (rocks +5 cm,
-    river -7 cm) so, unlike a climbed slope, an absolute base-height floor stays
-    valid; combine it with a tip-over test on the body-up axis."""
+def _fallen_natural(base_pos, base_ori, p, cfg):
+    """Natural-terrain fall check. With per-band inclines the robot climbs, so an
+    absolute base-height floor is invalid; test the base clearance above the LOCAL
+    ground elevation (terrain.natural_elev_at) instead, plus a tip-over test on the
+    body-up axis."""
+    from methods import terrain
     rot = p.getMatrixFromQuaternion(base_ori)
     upright = float(np.dot([0, 0, 1], rot[6:]))
-    return (upright < UPRIGHT_FALL or base_pos[2] < Z_FALL), upright
+    clear = base_pos[2] - terrain.natural_elev_at(cfg, base_pos[1])
+    return (upright < UPRIGHT_FALL or clear < CLEAR_FALL), upright
 
 
 # ── One monitored, squash-adaptive, continuous natural bout ──────────────────
 
-def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce"):
+def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce",
+              gain_policy=None):
     """One continuous bout over a natural transect. Same trigger / squash /
     safeguard machinery as the flat->slope experiment, but the run does not stop
     a fixed horizon after the first trigger: it continues over every band,
     re-triggering at each transition, until a fall, the duration cap, or the end
-    of the terrain. Returns the full per-step signals for NPZ dumping."""
+    of the terrain. Returns the full per-step signals for NPZ dumping.
+
+    `gain_policy` (optional) adapts the CPG's attitude-feedback gains, the
+    continuous alternative to switching the gait-shape parameters: a fixed
+    4-vector [kp_roll, kd_roll, kp_pitch, kd_pitch] applied throughout, or a
+    callable(pos_y) -> 4-vector applied each step (the clairvoyant per-band gain
+    oracle). The 8-D CPG shape parameters are still driven by `method_name`."""
     import pybullet as p
     from methods import terrain
     from methods.marxefe_optimizer import (get_base_orientation,
@@ -148,13 +186,20 @@ def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce"):
     load_environment(DT, use_gui=False)
     robot, _, joint_IDs_full, _, feet = load_robot(p)
     cpg = _reset_with_jitter(p, robot, seed)
+    if gain_policy is not None and not callable(gain_policy):
+        cpg.set_gains(gain_policy)                  # fixed feedback gains
 
     n_steps = int(round(DURATION / DT))
-    Monitor = DecisionTheoreticMonitor if trigger == "dt" else TriggerMonitor
+    Monitor = {"dt": DecisionTheoreticMonitor, "cusum": CusumDecisionMonitor}.get(
+        trigger, TriggerMonitor)
     monitor = Monitor(n_steps, k_sigma)
-    # oracle arg is unused for the natural arms; pass the incumbent as a filler.
-    method = METHODS[method_name](np.asarray(incumbent, float),
-                                  np.asarray(incumbent, float), box, seed)
+    # The clairvoyant `oracle` arm switches, band by band, to the pre-fit optimum
+    # for the surface the robot is currently on (no trigger, no search): an upper
+    # bound on what any parameter switch could achieve. Other arms use the trigger.
+    is_oracle = (method_name == "oracle")
+    surf_optima = load_surface_optima() if is_oracle else None
+    method = None if is_oracle else METHODS[method_name](
+        np.asarray(incumbent, float), np.asarray(incumbent, float), box, seed)
 
     keys = ["t", "x", "y", "z", "vx", "vy", "roll", "pitch", "upright"]
     log = {k: np.zeros(n_steps) for k in keys}
@@ -184,10 +229,20 @@ def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce"):
     for k in range(n_steps):
         t = k * DT
 
+        # ORACLE: clairvoyantly switch to the current band's surface optimum
+        # (ramped) whenever the robot crosses into a new band. No trigger/search.
+        if is_oracle:
+            surf = _surface_at(cfg["bands"], pos_y)
+            tgt = np.asarray(surf_optima.get(surf, incumbent), float)
+            if not np.array_equal(tgt, seg_target):
+                seg_start = applied.copy()
+                seg_target = tgt
+                seg_anchor = k
+
         # Window boundary (post first trigger): score the finished window, ask
         # the method for the next candidate, ramp toward it. SQUASH: pause once
         # the ratio is back below K; resume on a re-fire of the monitor.
-        if (trigger_step is not None and k > trigger_step
+        if (not is_oracle and trigger_step is not None and k > trigger_step
                 and (k - trigger_step) % WINDOW == 0):
             last_J = j_stab_window(win_buf["vx"], win_buf["roll"],
                                    win_buf["pitch"], fell=False)
@@ -217,6 +272,8 @@ def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce"):
 
         # Set the ground friction to the band the robot is currently standing on.
         terrain.apply_dynamic_friction(p, robot, pos_y)
+        if callable(gain_policy):                   # clairvoyant per-band gains
+            cpg.set_gains(gain_policy(pos_y))
 
         raw = np.array([int(len(p.getContactPoints(
             bodyA=0, bodyB=robot, linkIndexA=-1, linkIndexB=feet[j])) > 0)
@@ -234,7 +291,7 @@ def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce"):
         vel, _ = p.getBaseVelocity(robot)
         pitch, roll, _ = p.getEulerFromQuaternion(base_ori)  # physical (+Y fwd)
         pos_y = base_pos[1]
-        fallen, upright = _fallen_natural(base_pos, base_ori, p)
+        fallen, upright = _fallen_natural(base_pos, base_ori, p, cfg)
 
         log["t"][k] = t
         log["x"][k], log["y"][k], log["z"][k] = base_pos[0], base_pos[1], base_pos[2]
@@ -245,9 +302,10 @@ def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce"):
 
         y_new = np.array([vel[1], vel[0], pitch, roll])
         fired = monitor.step(k, t, y_new, applied)
-        method.on_step(y_new, applied)
+        if method is not None:
+            method.on_step(y_new, applied)
 
-        if fired and trigger_step is None:
+        if not is_oracle and fired and trigger_step is None:
             trigger_step = monitor.fire_step
             k0 = max(0, k - WINDOW)
             pre_J = j_stab_window(log["vx"][k0:k + 1], log["roll"][k0:k + 1],
@@ -295,7 +353,8 @@ def run_trial(seed, method_name, k_sigma, incumbent, cfg, box, trigger="ce"):
         upright=log["upright"], applied=applied_log, adapting=adapting_log,
         ce_raw=monitor.c_log[:n], ce_ema=monitor.ema_log[:n],
         ratio=monitor.ratio_trace()[:n],
-        dt_ctrl=(monitor.ctrl_log[:n] if trigger == "dt" else np.zeros(n)),
+        dt_ctrl=(monitor.ctrl_log[:n] if trigger in ("dt", "cusum") else np.zeros(n)),
+        cusum_s=(monitor.s_log[:n] if trigger == "cusum" else np.zeros(n)),
         trigger_kind=trigger,
         # events / summaries
         window_scores=np.asarray(window_scores, float),
@@ -374,8 +433,12 @@ def run_path(seed, method, trigger="ce"):
 
 def _job(args):
     f2s._limit_threads()
-    seed, method, k_sigma, incumbent, trigger, dt_move = args
+    seed, method, k_sigma, incumbent, trigger, dt_move, cusum_slack, cusum_h = args
     f2s.DT_BUDGET_MOVE = float(dt_move)            # picked up by the DT monitor
+    if cusum_slack is not None:
+        f2s.DT_CUSUM_SLACK = float(cusum_slack)   # picked up by the CUSUM monitor
+    if cusum_h is not None:
+        f2s.DT_CUSUM_H = float(cusum_h)
     from methods.marxefe_optimizer import JointCPG   # attitude-feedback ablation
     JointCPG.ATTITUDE_FEEDBACK = os.environ.get("CPG_ATTITUDE_FB", "1") != "0"
     from methods import terrain
@@ -392,10 +455,11 @@ def _job(args):
     return row
 
 
-def run(seeds, arms, k_sigma, workers, trigger="ce", dt_move=DT_BUDGET_MOVE):
+def run(seeds, arms, k_sigma, workers, trigger="ce", dt_move=DT_BUDGET_MOVE,
+        cusum_slack=None, cusum_h=None):
     os.makedirs(RUNS_DIR, exist_ok=True)
     incumbent = load_incumbent()
-    k_eff = 1.0 if trigger == "dt" else float(k_sigma)
+    k_eff = 1.0 if trigger in ("dt", "cusum") else float(k_sigma)
     tau = 8 * (4.0 * dt_move / CONTROL_PRIOR_SCALE) ** 2
     suffix = "" if trigger == "ce" else f"_{trigger}"
     manifest = MANIFEST_CSV if trigger == "ce" else os.path.join(
@@ -404,8 +468,11 @@ def run(seeds, arms, k_sigma, workers, trigger="ce", dt_move=DT_BUDGET_MOVE):
         RESULTS_DIR, f"config{suffix}.json")
 
     print(f"incumbent (flat/grass-optimal): {np.round(incumbent, 3).tolist()}")
+    cs = f2s.DT_CUSUM_SLACK if cusum_slack is None else cusum_slack
+    ch = f2s.DT_CUSUM_H if cusum_h is None else cusum_h
     print(f"trigger={trigger}  seeds={seeds} arms={arms} threshold={k_eff}"
-          + (f"  tau={tau:.3f} (move={dt_move})" if trigger == "dt" else ""))
+          + (f"  tau={tau:.3f} (move={dt_move})" if trigger in ("dt", "cusum") else "")
+          + (f"  cusum kappa={cs} h={ch}" if trigger == "cusum" else ""))
     print(f"natural transect: reach={REACH} m, bands {BAND_LEN} m, "
           f"grass start {START_GRASS} m; bout cap {DURATION} s")
 
@@ -419,7 +486,7 @@ def run(seeds, arms, k_sigma, workers, trigger="ce", dt_move=DT_BUDGET_MOVE):
                        duration=DURATION, target_vx=TARGET_VX,
                        incumbent=incumbent.tolist()), f, indent=2)
 
-    jobs = [(int(s), m, k_eff, incumbent, trigger, dt_move)
+    jobs = [(int(s), m, k_eff, incumbent, trigger, dt_move, cusum_slack, cusum_h)
             for s in range(seeds) for m in arms]
     ctx = get_context("spawn")
     rows = []
@@ -453,21 +520,28 @@ def main():
     ap.add_argument("stage", choices=["run"])
     ap.add_argument("--seeds", type=int, default=10)
     ap.add_argument("--arms", nargs="+", default=ARMS_DEFAULT,
-                    choices=list(METHODS.keys()))
+                    choices=ALL_ARMS)
     ap.add_argument("--K", type=float, default=f2s.K_DEFAULT,
                     help="CE trigger threshold on the grass-baseline-normalised ratio")
-    ap.add_argument("--trigger", choices=["ce", "dt"], default="ce",
+    ap.add_argument("--trigger", choices=["ce", "dt", "cusum"], default="ce",
                     help="ce: goal cross-entropy ratio; dt: decision-theoretic "
-                         "Newton-decrement lambda^2 vs a control-cost budget")
+                         "Newton-decrement lambda^2 vs a control-cost budget; "
+                         "cusum: CUSUM accumulation of lambda^2 (fires on sustained "
+                         "suboptimality, e.g. a friction transition)")
     ap.add_argument("--dt-move", type=float, default=DT_BUDGET_MOVE,
-                    help="dt only: reference gait move (fraction of param range)")
+                    help="dt/cusum: reference gait move (fraction of param range)")
+    ap.add_argument("--cusum-slack", type=float, default=None,
+                    help="cusum only: tolerated per-step suboptimality kappa (tau units)")
+    ap.add_argument("--cusum-h", type=float, default=None,
+                    help="cusum only: CUSUM decision bound h (tau units)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--no-attitude-fb", action="store_true",
                     help="disable the CPG's VMC body-attitude feedback (ablation)")
     args = ap.parse_args()
     os.environ["CPG_ATTITUDE_FB"] = "0" if args.no_attitude_fb else "1"
     run(args.seeds, args.arms, args.K, args.workers,
-        trigger=args.trigger, dt_move=args.dt_move)
+        trigger=args.trigger, dt_move=args.dt_move,
+        cusum_slack=args.cusum_slack, cusum_h=args.cusum_h)
 
 
 if __name__ == "__main__":

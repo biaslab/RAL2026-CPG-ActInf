@@ -136,35 +136,125 @@ def sample_friction_long(seed, reach=60.0, first_start=(1.5, 2.5),
 
 
 # Natural-landscape surfaces: name -> (lateral friction, geometry, amplitude[m]).
-# Geometry is kept traversable for the Laikago (foot clearance ~0.05-0.08 m):
-# the difficulty is the friction *contrast* between bands, not impassable steps.
+# HARD variant: lower friction across the board (with a near-frictionless "ice"
+# sheet), and larger geometry amplitudes (taller rocks, deeper channels) so both
+# the friction contrast AND the foot-placement hazard are more severe. Combined
+# with the per-band inclines of `sample_natural`, a band can stack a low-friction
+# surface on an uphill ramp.
 NATURAL_SURFACES = {
-    "grass":  (0.70, "noise", 0.010),   # near-flat, gentle undulation
-    "gravel": (0.55, "noise", 0.022),   # small high-frequency roughness
-    "rocks":  (0.95, "bumps", 0.05),    # low scattered rocks to step over
-    "river":  (0.20, "dip",   0.07),    # wet channel: a slippery depression
+    "grass":  (0.55, "noise", 0.025),   # gentle undulation (bigger swells)
+    "gravel": (0.40, "noise", 0.045),   # coarser high-frequency roughness
+    "rocks":  (0.80, "bumps", 0.11),    # taller scattered rocks to step over
+    "river":  (0.10, "dip",   0.13),    # wet channel: deeper, very slippery
+    "ice":    (0.05, "noise", 0.010),   # near-frictionless flat sheet
 }
 # muted RGB colours for top-down visualisation
 NATURAL_COLORS = {"grass": (0.30, 0.55, 0.25), "gravel": (0.55, 0.52, 0.48),
-                  "rocks": (0.40, 0.38, 0.36), "river": (0.20, 0.45, 0.75)}
+                  "rocks": (0.40, 0.38, 0.36), "river": (0.20, 0.45, 0.75),
+                  "ice": (0.75, 0.85, 0.92)}
+# bands that stay flat (no incline): a channel and a sheet
+_FLAT_SURFACES = {"river", "ice"}
 
 
-def sample_natural(seed, reach=20.0, band_len=(2.5, 4.5), start_grass=2.5):
+def sample_natural(seed, reach=20.0, band_len=(2.5, 4.5), start_grass=2.5,
+                   slope_frac=0.5, slope_deg=(8.0, 15.0)):
     """Sample a natural-landscape transect: forward bands of grass / gravel /
-    rocks / river (random order and lengths), starting on grass. Returns the
-    band layout and the friction zones (for friction_at). RNG seeded 5000+seed."""
+    rocks / river / ice (random order and lengths), starting on grass. The band
+    mix is biased toward the slippery surfaces (river, ice). A fraction
+    ``slope_frac`` of the non-flat bands (not river/ice) are inclined ramps of
+    ``slope_deg`` magnitude, signed uphill-biased (2:1) but net-bounded so the
+    transect does not climb away; ``band_slopes`` holds each band's incline (deg)
+    and ``band_elev0`` the cumulative ground elevation [m] at each band start (for
+    the terrain-relative fall check). Returns the band layout and the friction
+    zones (for friction_at). RNG seeded 5000+seed."""
     rng = np.random.default_rng(5000 + int(seed))
-    names = ["gravel", "rocks", "river", "grass"]
-    bands = [(0.0, "grass")]                       # start region
+    names = ["grass", "gravel", "rocks", "river", "ice"]
+    weights = np.array([0.15, 0.15, 0.15, 0.30, 0.25])   # biased to river/ice
+    bands = [(0.0, "grass")]                       # start region (flat grass)
     y = float(start_grass)
     while y < reach:
-        nm = names[int(rng.integers(0, len(names)))]
+        nm = names[int(rng.choice(len(names), p=weights))]
         if nm == bands[-1][1]:                     # avoid identical back-to-back
             nm = "grass" if nm != "grass" else "gravel"
         bands.append((round(y, 3), nm))
         y += float(rng.uniform(*band_len))
+
+    # per-band inclines: flat surfaces and the start band stay level; the rest are
+    # ramps with probability slope_frac, uphill-biased, elevation kept bounded.
+    band_slopes = [0.0]
+    elev = 0.0
+    for i in range(1, len(bands)):
+        nm = bands[i][1]
+        s = 0.0
+        if nm not in _FLAT_SURFACES and rng.random() < slope_frac:
+            mag = float(rng.uniform(*slope_deg))
+            # bias uphill 2:1, but force downhill if we have climbed too high
+            up = rng.random() < (0.2 if elev > 1.5 else 0.67)
+            s = mag if up else -mag
+        band_slopes.append(s)
+        L = (bands[i + 1][0] if i + 1 < len(bands) else reach) - bands[i][0]
+        elev += np.tan(np.deg2rad(s)) * L
+
+    band_elev0 = [0.0]
+    for i in range(1, len(bands)):
+        L = bands[i][0] - bands[i - 1][0]
+        band_elev0.append(band_elev0[-1]
+                          + float(np.tan(np.deg2rad(band_slopes[i - 1])) * L))
+
     zones = [(yb, NATURAL_SURFACES[nm][0], nm) for (yb, nm) in bands]
     return {"kind": "natural", "bands": bands, "zones": zones,
+            "band_slopes": band_slopes, "band_elev0": band_elev0,
+            "base_mu": NATURAL_SURFACES["grass"][0], "reach": reach, "seed": seed}
+
+
+def natural_elev_at(cfg, y):
+    """Ground elevation [m] at forward position ``y`` for a natural transect (the
+    cumulative per-band incline profile). 0 for the legacy flat-band terrain."""
+    bands = cfg["bands"]
+    slopes = cfg.get("band_slopes")
+    elev0 = cfg.get("band_elev0")
+    if not slopes or not elev0:
+        return 0.0
+    bi = 0
+    for i, (yb, _) in enumerate(bands):
+        if y >= yb:
+            bi = i
+        else:
+            break
+    return float(elev0[bi] + np.tan(np.deg2rad(slopes[bi])) * (y - bands[bi][0]))
+
+
+def sample_region_course(seed, reach=42.0, region_len=(14.0, 18.0),
+                         margin=4.0, start_grass=4.0,
+                         regions=("rocks", "ice", "river")):
+    """Sample a "few long hard regions" course: a small number of LONG homogeneous
+    hard-surface regions (from `regions` — the surfaces on which a tuned gait beats
+    the incumbent) separated by short benign grass margins, starting on grass.
+
+    Unlike sample_natural (many short alternating bands, where switching at every
+    abrupt boundary cancels the steady-state gain), each hard region is long enough
+    that the steady-state cost of the wrong gait dominates the one switch at its
+    entry: holding the incumbent should fail across a whole region, while a
+    region-matched gait traverses it. The grass margins give one benign, early-
+    detectable switch per region. Flat geometry (no incline). RNG seeded 5000+seed.
+    """
+    rng = np.random.default_rng(5000 + int(seed))
+    order = list(regions)
+    rng.shuffle(order)
+    bands = [(0.0, "grass")]
+    y = float(start_grass)
+    for nm in order:
+        if y >= reach:
+            break
+        bands.append((round(y, 3), nm))                # long hard region
+        y += float(rng.uniform(*region_len))
+        if y < reach:
+            bands.append((round(y, 3), "grass"))       # benign margin
+            y += float(margin)
+    zones = [(yb, NATURAL_SURFACES[nm][0], nm) for (yb, nm) in bands]
+    n = len(bands)
+    return {"kind": "natural", "bands": bands, "zones": zones,
+            "band_slopes": [0.0] * n, "band_elev0": [0.0] * n,
             "base_mu": NATURAL_SURFACES["grass"][0], "reach": reach, "seed": seed}
 
 
@@ -204,6 +294,10 @@ def _natural_height_grid(cfg, mesh=0.06, x_half=3.0):
         if NATURAL_SURFACES[nm][1] == "noise":
             grid[:, j] = amp * (fine[:, j] if nm == "gravel" else gentle[:, j])
 
+    # per-band incline baseline (cumulative), added under the micro-geometry
+    elev_col = np.array([natural_elev_at(cfg, y) for y in yw])
+    grid += elev_col[None, :]
+
     rock_cols = np.where(band_of_col == "rocks")[0]
     if rock_cols.size:
         y_lo, y_hi = yw[rock_cols.min()], yw[rock_cols.max()]
@@ -222,7 +316,8 @@ def _natural_height_grid(cfg, mesh=0.06, x_half=3.0):
         L = max(y_end - yb, 0.5)
         sel = (yw >= yb) & (yw < y_end)
         prof = -NATURAL_SURFACES["river"][2] * 0.5 * (1 - np.cos(2 * np.pi * (yw[sel] - yb) / L))
-        grid[:, sel] = prof[None, :]              # valley across full width
+        # valley across full width, carved into the incline baseline
+        grid[:, sel] = elev_col[sel][None, :] + prof[None, :]
     return grid, dx, dy, base_y
 
 
