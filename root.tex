@@ -117,8 +117,8 @@ In the following, we contribute
 \section{PROBLEM STATEMENT}
 
 We first describe the base platform whose motion defines the locomotion objective, and then the controller driving it: a central pattern generator that produces the coordinated leg motion, augmented with an attitude virtual model controller that reactively corrects posture deviations.
-We then argue that, even with this reactive posture loop, the parameters yielding stable locomotion depend on the terrain, so that a parameter set tuned for one terrain degrades once the terrain changes.
-This motivates online adaptation of the parameters as a requirement for resuming stable locomotion.
+We then argue that, even with this reactive posture loop, the parameters yielding stable locomotion depend on the \emph{operating condition} -- the combined state of the environment and of the robot's own body -- so that a parameter set tuned for one condition degrades once that condition changes, whether the change is external, such as a different terrain, or intrinsic to the robot, such as an added payload or a weakened actuator.
+This motivates online adaptation of the parameters as a requirement for resuming stable locomotion after any such shift.
 
 \subsection{Base platform and locomotion objective}
 \label{sec:base-platform}
@@ -247,33 +247,40 @@ Adjusting a knee angle changes the effective leg length, so Eq.~\ref{eq:vmc-dist
 The VMC gains are held at fixed, hand-tuned values and are not part of the parameter vector $\theta$.
 The attitude loop thus acts at a fast timescale, correcting momentary posture deviations within a stride, but it leaves the rhythmic pattern itself untouched.
 Ajallooeian et al.~\cite{ajallooeian2013central} observe that such momentary corrections lose effectiveness as the terrain becomes more difficult, when the attitude corrections begin to work against the forward progression planned by the CPG.
-Whether locomotion remains stable therefore still hinges on the gait parameters $\theta$ matching the terrain, which we examine next.
+Whether locomotion remains stable therefore still hinges on the gait parameters $\theta$ matching the operating condition, which we examine next.
 
-\subsection{Terrain Dependence of the Optimal Parameters}
-\label{sec:terrain-dependence}
+\subsection{Shifts in Parameter Optimality}
+\label{sec:optimality-shift}
 
-For a fixed terrain, the parameter vector $\theta$ can be tuned to produce stable locomotion.
-Let $e$ denote the terrain.
-Running the controller with parameters $\theta$ on terrain $e$, with the attitude feedback of Section~\ref{sec:vmc} active, induces a distribution $p(\xi \given \theta, e)$ over the base state, which we score by the locomotion objective of Eq.~\ref{eq:locomotion-objective},
+For a fixed operating condition, the parameter vector $\theta$ can be tuned to produce stable locomotion.
+Let $e$ denote the \emph{operating condition}: the combined state of the environment and of the robot's own body that the gait must accommodate.
+It collects extrinsic factors, such as the terrain's incline, friction, and micro-geometry, together with intrinsic ones, such as the trunk's mass distribution and the torque capacity of each actuator.
+Running the controller with parameters $\theta$ under condition $e$, with the attitude feedback of Section~\ref{sec:vmc} active, induces a distribution $p(\xi \given \theta, e)$ over the base state, which we score by the locomotion objective of Eq.~\ref{eq:locomotion-objective},
 \begin{align}
     V(\theta, e) = - \mathbb{E}_{p(\xi \given \theta, e)} \Big[ \frac{1}{v^\star} \big\lVert v - v^\star \big\rVert + \frac{1}{\psi_0} \big\lVert (\psi_r, \psi_p) \big\rVert \Big] \,,
     \label{eq:criterion}
 \end{align}
 setting $V = -c_f$ whenever the robot falls.
 The scale $\psi_0$ lets the attitude term dominate, encoding that remaining upright is the primary requirement.
-In practice the expectation is a time average over an evaluation window, computed on low-pass-filtered angles so that the gait's rhythmic rocking is not penalized, with the pitch measured relative to the terrain incline and progress beyond the target speed not rewarded.
-The best gait for terrain $e$ is then the terrain-conditioned optimum
+In practice the expectation is a time average over an evaluation window, computed on low-pass-filtered angles so that the gait's rhythmic rocking is not penalized, with the pitch measured relative to any sustained attitude offset and progress beyond the target speed not rewarded.
+The best gait for condition $e$ is then the condition-conditioned optimum
 \begin{align}
     \theta^{\star}(e) = \underset{\theta}{\arg\max}\; V(\theta, e) \,.
     \label{eq:terrain-optimum}
 \end{align}
 
-The difficulty is that $\theta^{\star}(e)$ is not constant across terrains.
-Optimizing Eq.~\ref{eq:criterion} on surfaces that differ in incline, friction, and micro-geometry yields distinct parameter vectors: rougher or lower-friction ground calls for stronger inter-limb coupling, faster leg swing, and sharper stance-swing transitions than flat ground, and each parameter set is most stable on the terrain it was tuned for.
-On a natural landscape these properties drift continuously along the path, so the optimum $\theta^{\star}(e)$ drifts with them (Section~\ref{sec:experiments}).
+The difficulty is that $\theta^{\star}(e)$ is not constant across conditions.
+Optimizing Eq.~\ref{eq:criterion} under conditions that differ -- in the terrain underfoot, in the load the trunk carries, or in the torque an actuator can deliver -- yields distinct parameter vectors, and each is most stable under the condition it was tuned for.
+A change in condition therefore relocates the optimum,
+\begin{align}
+    \theta^{\star}(e_{\text{old}}) \neq \theta^{\star}(e_{\text{new}}) \,,
+    \label{eq:optimality-shift}
+\end{align}
+a \emph{shift in parameter optimality}.
+Such shifts arise from external causes, as when the robot steps from one surface onto another, and equally from intrinsic ones, as when it picks up a payload or an actuator loses part of its torque; some conditions drift continuously, as along a natural landscape, while others change abruptly.
 
-Because $\theta$ is held fixed, a change in terrain leaves the controller at a now-suboptimal point $\theta^{\star}(e_{\text{old}}) \neq \theta^{\star}(e_{\text{new}})$, and the resulting attitude deviations compound: as the trunk tilts away from balance, recovery demands corrections beyond what the bounded attitude feedback of Eq.~\ref{eq:vmc-distribution} can supply, and locomotion can fail before the new terrain is traversed.
-Resuming stable locomotion after a terrain change therefore requires detecting that the terrain has changed and re-tuning $\theta$ toward $\theta^{\star}(e_{\text{new}})$ online, quickly enough to preserve balance.
+Because $\theta$ is held fixed, a shift leaves the controller at a now-suboptimal point, and the resulting attitude deviations compound: as the trunk tilts away from balance, recovery demands corrections beyond what the bounded attitude feedback of Eq.~\ref{eq:vmc-distribution} can supply, and locomotion can fail before the episode ends.
+Resuming stable locomotion after a shift therefore requires detecting that the optimum has moved and re-tuning $\theta$ toward $\theta^{\star}(e_{\text{new}})$ online, quickly enough to preserve balance.
 
 
 \section{METHODS}

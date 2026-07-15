@@ -109,6 +109,10 @@ MARX_GOAL_VEL_STD = MON_VEL_STD  # MarxEFE selection ONLY: goal-prior std on
                                  # vx,vy. Kept separate from MON_VEL_STD so an
                                  # experiment can tighten the method's velocity
                                  # goal without altering the trigger statistic.
+MARX_PITCH_DEG = MON_PITCH_DEG   # MarxEFE selection ONLY: goal-prior std on
+MARX_ROLL_DEG = MON_ROLL_DEG     # pitch/roll. Separate from MON_* so tightening
+                                 # the method's attitude goal (the "brace" prior)
+                                 # leaves the trigger monitors untouched.
 DT_BUDGET_MOVE = 0.02        # reference gait move (fraction of each param's range)
 
 # CUSUM variant of the decision-theoretic trigger (see CusumDecisionMonitor): the
@@ -546,7 +550,7 @@ class MarxEFE(NoAdapt):
         from methods.marxefe_optimizer import build_marx_agent
         np.random.seed(1)
         goal_std = (MARX_GOAL_VEL_STD, MARX_GOAL_VEL_STD,
-                    np.deg2rad(MON_PITCH_DEG), np.deg2rad(MON_ROLL_DEG))
+                    np.deg2rad(MARX_PITCH_DEG), np.deg2rad(MARX_ROLL_DEG))
         self.agent = build_marx_agent(
             target_velocity=TARGET_VX,
             control_prior_scale=MARX_CONTROL_PRIOR_SCALE,

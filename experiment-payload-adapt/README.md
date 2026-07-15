@@ -71,3 +71,37 @@ t = 1 s while walking.
 Variants worth trying if the default is too easy/hard: `--shift-lat 0.225`
 (adds falls), heavier payload, or an add-at-T/2 payload instead of a shift
 (set phase 1 = no payload).
+
+## Fall-rate sweep (2026-07, `sweep_fallrate.py`)
+
+Systematic sweep for a HIGH no-adapt fall rate that is still recoverable
+(10 seeds/setting, 30 s bouts unless noted; "recoverable" = a BO-fit gait
+walks forward under the always-shifted condition):
+
+| setting (mass / lat / back) | fall% | notes |
+|---|---|---|
+| 8 / 0.20 / 0.20 (old default) | 0% | limps, vx2 ~0.38 |
+| **8 / 0.225 / 0.225** | 70% @30 s, **90% @60 s** | falls +5..+30 s post-shift, 0 shocks; **recoverable**: BO gait V=+0.48, vx=0.46, 0 falls |
+| 8 / 0.23 / 0.23 | 70% @30 s | no gain over 0.225 |
+| 8 / 0.2375 / 0.2375 | 90% | UNRECOVERABLE (BO best V=-0.50, backward only) |
+| 8 / 0.25 / 0.25 | 100% | unrecoverable (confirms earlier screen) |
+| 9 / 0.20 / 0.20 | 50% | late falls (+13.6 s) |
+| 9 / 0.225 / 0.225 | 100% | UNRECOVERABLE (BO best V=-0.59) |
+| 10 / 0.20-0.225 | 90-100% | 30% shocks, incl. pre-shift falls: phase 1 unsafe |
+| 8 / lat 0.30 / back 0.10 | 100% | fast falls (+2.2 s), unrecoverable (LHS: only backward) |
+| 8 / lat 0.10 / back 0.30 | 0% | pure rearward shift is benign (vx2 even improves) |
+| 8 / 0.20 / 0.20, up 0.30 | 20% | raised payload only mildly destabilises |
+
+Take-aways: the **lateral offset is the destabilising axis** (sagittal shifts
+are absorbed by pitch); the recoverability cliff is razor-thin (0.225
+recoverable, 0.2375 not); >=10 kg breaks the safe-phase-1 design. For a
+fall-dominated regime run
+
+```bash
+python experiment-payload-adapt/run_experiment.py run --shift-lat 0.225 --shift-back 0.225 ...
+python experiment-payload-adapt/fit_payload_oracles.py   # refit optima at the new offsets!
+```
+
+(no-adapt then falls 9/10 seeds; the surviving seed limps at vx ~0.07).
+Sweep data: `results/sweep_fallrate.csv`, `results/sweep_screen.csv`,
+`results/sweep_bo_recover.csv`, `results/sweep_fallrate_B_60s.csv`.

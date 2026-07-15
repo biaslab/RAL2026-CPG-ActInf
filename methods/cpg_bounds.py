@@ -17,7 +17,7 @@ import torch
 
 # ── Parameter bounds (joint-space CPG) ────────────────────────────────────────
 bounds = torch.tensor([
-    [4.0, 10.0, 10.0, 25.0, 0.05, 0.10, 0.5, 0.1],   # lower
+    [4.0, 10.0, 10.0, 25.0, 0.05, 0.0, 0.0, 0.1],   # lower
     [12.0, 25.0, 25.0, 60.0, 0.5, 0.35, 1.0, 10.0],  # upper
 ], dtype=torch.double)
 
