@@ -1,9 +1,0 @@
-{
-  "k_sigma": 1.928615239869103,
-  "statistic": "crossentropy_ratio_to_baseline",
-  "flat_ceiling": 1.0248626990173706,
-  "stable_floor": 1.4835501845146946,
-  "falling_level": 79.63099344215951,
-  "n_survivors": 6,
-  "delay_mean": 15.31625
-}

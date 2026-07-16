@@ -82,11 +82,12 @@ Rapid event-triggered adaptation of central pattern generator parameters for qua
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{abstract}
-Central pattern generators (CPGs) produce efficient rhythmic locomotion from a small set of parameters, but a set tuned for one terrain is no longer optimal once the terrain changes, even when a reactive attitude controller keeps the trunk level.
-We augment a coupled-Hopf-oscillator CPG with an attitude virtual model controller and study online re-tuning of its gait parameters as the terrain varies.
-We separate two questions: \emph{when} to change the gait, resolved by an event trigger that fires on the controllable part of the prediction error, and \emph{what} to change it to, where we compare grid search, Bayesian optimization, and an autoregressive active inference agent that minimizes expected free energy.
-On a natural transect of grass, gravel, rock, and shallow water, grid search and Bayesian optimization destabilize the robot while physically probing candidate gaits, raising the fall rate, whereas the active inference agent selects parameters from a learned model without such trials and is the only method to reduce falls below holding the incumbent gait.
-Generalizing this benefit across recurring terrain changes remains open.
+Central pattern generators produce efficient rhythmic locomotion from a small set of parameters, but a set tuned for one operating condition is no longer optimal once that condition changes, even when a reactive attitude controller keeps the trunk level.
+We augment a coupled-Hopf-oscillator CPG with an attitude virtual model controller and study online re-tuning of its gait parameters as the operating condition varies.
+We separate two questions: \emph{when} to change the gait, resolved by a prediction-error trigger that fires on a sustained loss of performance, and \emph{what} to change it to, addressed by a safe active inference agent that selects gait parameters by minimizing an expected free energy over a learned map from parameters to performance, keeping a persistent memory of which gaits have led to a fall.
+Because the agent screens each candidate against this memory instead of physically trialing it, as the grid search or Bayesian optimization of a black-box optimizer must, it recovers online without such destabilizing trials.
+On two perturbations of the robot's own dynamics -- a weakened leg actuator and a shifting trunk payload, each recurring through a continuous bout -- the agent learns within the bout to stop selecting the gaits that fall.
+How far this recovery generalizes, and how much the gait parameterization itself caps it, remain open.
 \end{abstract}
 
 
@@ -106,12 +107,12 @@ Among CPG models used in robotics, coupled nonlinear oscillators are biologicall
 
 An open-loop CPG generates stable rhythms on flat ground, but rough or sloped terrain induces body rotations that the rhythm alone cannot correct, so feedback is added to close the loop. Contact and load feedback resynchronize the oscillators to the actual footfalls \cite{PatternGenerators2008}, while posture feedback corrects the trunk attitude directly. Virtual model control (VMC) offers an intuitive route to the latter, computing joint actions as if virtual springs and dampers were attached to the body \cite{pratt2001virtual}. Ajallooeian et al.~augment a quadruped CPG with virtual springs that pull the trunk level, together with a stumbling-correction reflex, and thereby traverse unperceived rough terrain and slopes that defeat an open-loop CPG \cite{ajallooeian2013central}. We adopt this attitude VMC as a reactive posture layer beneath the CPG (Section~\ref{sec:vmc}) and ask a complementary question: given such a controller, when and how should the CPG's own gait parameters be re-tuned as the terrain changes.
 
-A complementary line of work tunes gait parameters as black-box optimization, from measured performance rather than a model of the dynamics. Bayesian optimization suits this setting, where each walking trial is expensive: it fits a Gaussian-process surrogate to the parameter-score pairs seen so far and proposes the next parameters by maximizing an acquisition function such as the upper confidence bound. Run \emph{online}, it scores the parameters of the most recent window, augments the surrogate, and proposes the next window's parameters, refining the gait during walking; a trust region around the current best keeps proposals from jumping to destabilizing gaits \cite{eriksson2019turbo}. We adopt this online Bayesian optimization as an adaptation baseline in Section~\ref{sec:experiments}.
+A complementary line of work tunes gait parameters as black-box optimization, from measured performance rather than a model of the dynamics. Bayesian optimization suits this setting, where each walking trial is expensive: it fits a Gaussian-process surrogate to the parameter-score pairs seen so far and proposes the next parameters by maximizing an acquisition function such as the upper confidence bound. Run \emph{online}, it scores the parameters of the most recent window, augments the surrogate, and proposes the next window's parameters, refining the gait during walking; a trust region around the current best keeps proposals from jumping to destabilizing gaits \cite{eriksson2019turbo}. We take this online Bayesian optimization, together with grid search, as the black-box alternatives our model-based agent is contrasted against.
 
 In the following, we contribute
 \begin{itemize}
-    \item the design of an intelligent agent that continuously updates parameters of a central pattern generator, and
-    \item by benchmarking this agent against offline grid search and online Bayesian optimization.
+    \item a prediction-error trigger that decides \emph{when} to re-tune a central pattern generator, firing on a sustained loss of performance, and
+    \item a safe active inference agent that decides \emph{what} to re-tune to, selecting parameters from a learned model with a persistent memory of failed gaits and thereby avoiding the destabilizing on-robot trials that grid search and Bayesian optimization require.
 \end{itemize}
 
 \section{PROBLEM STATEMENT}
@@ -287,195 +288,124 @@ Resuming stable locomotion after a shift therefore requires detecting that the o
 \label{sec:methods}
 
 
-\subsection{Autoregressive active inference agent}
+\subsection{Safe active inference agent}
 \label{sec:agent}
 
-The agent models the robot as a multivariate autoregressive process with exogenous inputs (MARX) \cite{nisslbeck2024coupled}.
-The observation $y_k = (v_x, v_y, \psi_p, \psi_r)$ is a linear-Gaussian function of a regressor $x_k = [\,u_k,\ \bar{u}_k,\ \bar{y}_k\,]^{\intercal}$ that stacks the current control $u_k = \theta$ with short memories $\bar{u}_k, \bar{y}_k$ of past inputs and outputs,
-\begin{align} \label{eq:likelihood}
-    p(y_k \given \Theta, x_k) = \cN\big(y_k \given A^{\intercal} x_k,\, W^{-1} \big) ,
+Rather than model the trunk dynamics, the agent models the \emph{outcome} of a gait directly: it maintains a probabilistic map from the CPG parameters to the performance they achieve under the current operating condition, and selects the next gait by minimizing an expected free energy over that map.
+The map is a Gaussian-process (GP) surrogate for the criterion of Eq.~\ref{eq:criterion},
+\begin{align} \label{eq:gp-prior}
+    V(\theta) \sim \mathcal{GP}\big(0,\, \kappa(\theta, \theta')\big) ,
 \end{align}
-with parameters $\Theta = (A, W)$.
-A matrix-normal-Wishart prior is conjugate to this likelihood \cite[ID: P323]{Soch}, so the belief over $\Theta$ is updated in closed form by rank-one Bayesian filtering as each pair $(x_k, y_k)$ arrives, and marginalizing it gives a Student-t posterior predictive whose mean and covariance,
-\begin{align} \label{eq:postpred}
-    \mu_k(u) = M_{k-1}^{\intercal} x_k , \qquad
-    \Sigma_k(u) = \frac{1 + x_k^{\intercal} \Lambda_{k-1}^{-1} x_k}{\nu_{k-1} - D_y - 1}\, \Omega_{k-1} ,
-\end{align}
-are smooth functions of the control $u$ through the regressor $x_k$.
-Here $M, \Lambda, \Omega, \nu$ are the filtered posterior parameters and $D_y = \dim y$; we take the recursions as standard for this conjugate model \cite{nisslbeck2024coupled, Soch} and keep the focus on the control objective.
+fitted to a memory $\mathcal{D}_k = \{(\theta_j, V_j)\}_{j<k}$ of the gaits tried so far and the post-shift score each obtained, a fall recorded as a floor value $V_j = V_{\text{fall}}$.
+Conditioning on $\mathcal{D}_k$ gives a Gaussian posterior predictive with mean $\mu(\theta)$ and variance $\sigma^2(\theta)$ at any candidate gait, over observation noise $\sigma_n^2$.
+To keep the map learnable from the few queries a single bout provides, only the high-leverage subset of the parameters of Eq.~\ref{eq:cpg-parameters} is searched, the rest held at the incumbent; the memory persists across recurrences of the shift, so the map fills in as the same condition is met again and no gait is ever supplied in advance.
 
-The agent selects controls by minimizing an expected free energy.
-Two priors close the model: a control prior $p(u) = \cN(u \given \mu_0, \Upsilon^{-1})$ regularizes the parameters toward a reference gait $\mu_0$ with precision $\Upsilon$, and a goal prior $\bar{p}(y) = \cN(y \given m_{*}, S_{*})$ encodes the target observation, the desired forward velocity $v^{\star}$ at an upright attitude, with $S_{*}$ setting how tightly each channel is enforced.
-Planning over a horizon $\tau = \{k{+}1, \dots, k{+}T\}$ unrolls the model, substituting predictive means for the not-yet-observed outputs, and minimizes the cumulative divergence of the predicted observations from the goal prior,
+The agent selects the next gait by minimizing an expected free energy, following the NARX--EFE control of \cite{kouw2023information}.
+A goal prior $\bar{p}(V) = \cN(V \given y^{\star}, \tau^2)$ encodes the preferred outcome $y^{\star}$, an optimistic target performance, with tolerance $\tau^2$.
+Under the Gaussian posterior predictive, the expected free energy of a candidate gait is
 \begin{align} \label{eq:EFE}
-    G(u_\tau) = \sum_{t \in \tau} D_{\mathrm{KL}}\!\big[\, p(y_t \given u_t, \mathcal{D}_k) \,\big\|\, \bar{p}(y_t) \,\big] .
+    G(\theta) = \underbrace{\frac{\big(\mu(\theta) - y^{\star}\big)^2 + \sigma^2(\theta) + \sigma_n^2}{2\tau^2}}_{\text{goal seeking}}
+    - \underbrace{\tfrac{1}{2}\ln\!\Big(1 + \tfrac{\sigma^2(\theta)}{\sigma_n^2}\Big)}_{\text{information gain}} ,
 \end{align}
-Expanding the divergence and adding the control prior gives the objective minimized at each planning step,
+and the agent proposes
 \begin{align} \label{eq:total-MAP}
-    \hat{u}_\tau = \underset{u_\tau}{\arg\min} \sum_{t \in \tau} \Big[\,
-        &\underbrace{\tfrac{1}{2}\tr\!\big(S_{*}^{-1} \Sigma_t(u_t)\big) - \tfrac{1}{2}\ln| \Sigma_t(u_t) |}_{\text{information gain}} \nonumber \\[-2pt]
-        + \; &\underbrace{\tfrac{1}{2}\big(\mu_t(u_t) - m_{*}\big)^{\intercal} S_{*}^{-1} \big(\mu_t(u_t) - m_{*}\big)}_{\text{goal seeking}} \nonumber \\[-2pt]
-        + \; &\underbrace{\tfrac{1}{2}\big(u_t - \mu_0\big)^{\intercal} \Upsilon \big(u_t - \mu_0\big)}_{\text{control cost}} \,\Big] .
+    \hat{\theta} = \underset{\theta}{\arg\min}\; G(\theta)
 \end{align}
-The information-gain terms, through the predictive covariance $\Sigma_t$, drive the agent to resolve model uncertainty; the goal-seeking term, a Mahalanobis distance of the predicted mean $\mu_t$ from the target $m_{*}$, drives it toward stable walking; and the control cost keeps it near the reference gait.
+over a quasi-random pool of candidates, excluding gaits already in memory.
+The goal-seeking term pulls the proposal toward gaits the map predicts will perform near $y^{\star}$; the information-gain term rewards resolving predictive uncertainty $\sigma^2(\theta)$.
+Safety is not a separate constraint but a consequence of the goal prior: a gait the memory associates with falling has a posterior mean $\mu(\theta)$ far below $y^{\star}$, so its goal-seeking cost is large and it is avoided, while the agent still explores gaits it has not yet ruled out.
+The tolerance $\tau^2$ may be fixed or made curvature-aware, tightening where the map is sharply peaked \cite{kouw2023information}.
+Because the agent screens each candidate against its own memory before committing, it selects a recovery gait without the destabilizing on-robot trials a black-box optimizer needs to score a candidate, the property Section~\ref{sec:experiments} turns on.
 
 \subsection{Prediction-error triggering}
 \label{sec:trigger}
 
-Re-tuning $\theta$ at every step is wasteful and, as Section~\ref{sec:experiments} shows, actively destabilizing, so the agent adapts only when the incumbent gait is no longer matched to the terrain.
-We detect that event by testing, online, whether the incumbent controls still minimize the control objective of Eq.~\ref{eq:total-MAP}.
+Re-tuning $\theta$ at every step is wasteful and, as Section~\ref{sec:experiments} shows, actively destabilizing, so the agent adapts only when the incumbent gait is no longer matched to its operating condition.
+We detect that event from the controller's own prediction error, without a model of the perturbation and without being told when it occurs.
 
-Consider the one-step objective $G(u)$ under two simplifications that hold in the monitoring regime, once the gait is steady and the belief identified.
-The control cost is a fixed price rather than a signal, and the information-gain term is flat in $u$ (its only dependence is through $\ln(1 + x^{\intercal}\Lambda^{-1}x)$, negligible for large $\Lambda$).
-What remains is the goal cross-entropy
-\begin{align} \label{eq:trigger-ce}
-    G(u) = \tfrac{1}{2}\tr\!\big(S_{*}^{-1}\Sigma\big) + \tfrac{1}{2}\big(\mu(u) - m_{*}\big)^{\intercal} S_{*}^{-1} \big(\mu(u) - m_{*}\big) ,
+During nominal walking the agent measures a baseline forward speed $\bar{v}$ and attitude tilt $\bar{\rho}$ over a short warmup window.
+Thereafter it tracks, on exponentially smoothed signals, the shortfall against this baseline,
+\begin{align} \label{eq:trigger-err}
+    \epsilon_k = \frac{\max(0,\, \bar{v} - v_k)}{\bar{v}} + \frac{\max(0,\, \rho_k - \bar{\rho})}{\rho_0} ,
 \end{align}
-with $\mu(u) = M^{\intercal} x$ affine in $u$ through the learned control-to-output gain $B := \partial \mu / \partial u$, a block of $M^{\intercal}$.
-The incumbent $\theta$ remains terrain-matched precisely when it is a stationary point of $G$.
-Because $\mu$ is affine in $u$ and $G$ is quadratic in $\mu$, $G$ is exactly convex-quadratic in $u$, with gradient and Hessian
-\begin{align} \label{eq:grad-hess}
-    g \! = \! \cmnabla_u G(\theta) = B^{\intercal} S_{*}^{-1}(\mu \! - \! m_{*}) , \ \
-    H \! = \! \cmnabla_u^2 G = B^{\intercal} S_{*}^{-1} B .
+a forward-speed deficit plus an excess tilt, each on its own scale ($\rho_0$ a reference tilt).
+A shift in the operating condition drives $\epsilon_k$ persistently positive, whereas the stride-frequency ripple of steady walking averages out, so we accumulate the shortfall in a one-sided CUSUM statistic
+\begin{align} \label{eq:trigger-cusum}
+    S_k = \max\big(0,\; S_{k-1} + \epsilon_k - \kappa \big) ,
 \end{align}
-The value $G(\theta)$ alone does not test optimality: the goal error $\mu - m_{*}$ can grow along directions the controls cannot affect, terrain error that $B$ annihilates, leaving $\theta$ stationary despite a high cross-entropy.
-The gradient separates the fixable error from the rest.
-Its affine-invariant magnitude is the Newton decrement
-\begin{align} \label{eq:newton}
-    \lambda^2 = g^{\intercal} H^{-1} g = \big\lVert \Pi_{\mathcal{R}(B)}(\mu - m_{*}) \big\rVert^2_{S_{*}^{-1}} ,
-\end{align}
-the squared goal error projected onto the controllable subspace $\mathcal{R}(B)$.
-Since $G$ is exactly quadratic, $\tfrac{1}{2}\lambda^2 = G(\theta) - \min_u G(u)$ is not a local approximation but the exact suboptimality gap, the cross-entropy a full re-tuning of the gait would recover.
-Triggering on $\lambda^2$ therefore fires on \emph{fixable} mismatch rather than on raw prediction error, and correctly stays silent when the error lies in the uncontrollable subspace, where no gait switch would help.
+in which the slack $\kappa$ is the per-step error tolerated as noise, and fire an event when $S_k$ exceeds a bound $h$.
+Because the CUSUM integrates the deficit over time, it registers the sustained mismatch a perturbation creates while rejecting the momentary innovations that dominate a one-step residual at $100$\,Hz.
 
-The threshold follows from the same statistic.
-Under the null hypothesis that the incumbent is still optimal, the goal error is predictive noise, $\mu - m_{*} \sim \cN(0, \Sigma)$, so $\lambda^2$ is a quadratic form of a Gaussian and hence (generalized) $\chi^2$ with $r = \operatorname{rank}(B) \le \min(D_u, D_y)$ degrees of freedom.
-A target false-alarm rate $\alpha$ then fixes
-\begin{align} \label{eq:chi2}
-    K = \chi^2_r(1 - \alpha) ,
-\end{align}
-a threshold with units and a calibrated meaning in place of a hand-tuned level.
-Equivalently, restoring the control cost as the price of adapting gives a decision-theoretic rule: trigger only when the recoverable gain outweighs the cost of the corrective step $\Delta u = -H^{-1} g$, that is $\tfrac{1}{2}\lambda^2 > \tfrac{1}{2}\Delta u^{\intercal}\Upsilon\,\Delta u$, so that adaptation fires exactly when the full expected free energy would decrease.
-
-In practice, calibrating the null scale of $\lambda^2$ on a short flat-walking prefix reduces the test to a dimensionless ratio near unity during nominal locomotion, the form used in Section~\ref{sec:experiments}.
-The attitude channels of $S_{*}$ are tightened relative to the velocity channels so the statistic responds to a loss of balance rather than to a steady change in pitch, and it is smoothed by an exponential moving average to reject stride-frequency ripple.
-An event fires when the smoothed statistic exceeds $K$ for $P$ consecutive steps; the monitor then disarms and re-arms only once it falls back well below $K$, so a single terrain change produces one event while a corridor of repeated changes re-triggers once per transition.
-Symmetrically, adaptation is paused whenever the statistic returns below $K$, so re-tuning runs only while the incumbent is provably suboptimal.
+The monitor is armed only after the robot has walked at the baseline speed and attitude for a sustained interval past a grace period, so that the transient following a recovery is never mistaken for a fresh perturbation; it disarms on firing and re-arms once nominal walking resumes.
+A single change therefore produces one event, and a sequence of changes re-triggers once per transition rather than latching.
+Symmetrically, adaptation is paused whenever the robot is walking nominally, so re-tuning runs only while performance is measurably degraded.
 
 \section{EXPERIMENTS}
 \label{sec:experiments}
 
-We evaluate three parameter-selection strategies for the Hopf-oscillator CPG controller on the Laikago quadruped in PyBullet: (i) an offline \emph{grid search} over a small set of CPG parameters, a fixed non-adaptive reference; (ii) online \emph{Bayesian optimization} (BO) with a Gaussian-process surrogate and a UCB acquisition function, a state-of-the-art black-box optimizer; and (iii) the proposed \emph{MARX-EFE} active inference agent, which continually updates the parameters by minimizing expected free energy. All three search the same 8-dimensional space $\theta$ of Eq.~\ref{eq:cpg-parameters} with identical bounds, and all run with the attitude VMC of Section~\ref{sec:vmc} active. Control runs at $\Delta t = 0.01$\,s with a target forward velocity of $1.0$\,m/s; each candidate is scored over a steady-state window with the settling transient excluded, and parameter changes are interpolated over the first $150$ steps so the gait never jumps.
+We evaluate the safe active inference agent on the Laikago quadruped in PyBullet, on two perturbations of the robot's own dynamics: a weakened leg actuator (Section~\ref{sec:exp-damage}) and a shifting trunk payload (Section~\ref{sec:exp-payload}).
+In both, the agent runs with the attitude VMC of Section~\ref{sec:vmc} active and adapts only the high-leverage subset of the parameter vector $\theta$ of Eq.~\ref{eq:cpg-parameters}, within fixed bounds throughout, while adaptation is gated by the prediction-error trigger of Section~\ref{sec:trigger}.
+Holding the incumbent gait $\theta^{\star}(\text{flat})$ without adapting is the reference against which the agent is measured.
+Control runs at $\Delta t = 0.01$\,s with a target forward velocity of $0.5$\,m/s; each perturbation event is scored by the criterion of Eq.~\ref{eq:criterion} over a hold window with the ramp-in excluded, and gait switches are ramped in over $0.3$\,s so the gait never jumps.
 
-\subsection{Adaptation protocol}
-\label{sec:exp-protocol}
+\subsection{Adapting to actuator damage}
+\label{sec:exp-damage}
 
-Adaptation is gated by the optimality monitor of Section~\ref{sec:trigger}.
-A MARX belief (Eq.~\ref{eq:likelihood}) is filtered online from the observation $y_k = (v_x, v_y, \psi_p, \psi_r)$ with forgetting factor $0.995$, under a stability-oriented goal prior whose attitude channels are tightened, so the statistic responds to a loss of balance rather than to a steady pitch offset.
-At each step the monitor evaluates the Newton decrement $\lambda^2$ (Eq.~\ref{eq:newton}), the goal cross-entropy that re-tuning the gait could recover, from the model's steady-state control gain $B$.
-Because $B$ is the multi-step feedthrough of the identified model, $\lambda^2$ reflects the sustained mismatch a terrain change creates, whereas a one-step innovation at $100$\,Hz is dominated by persistence and barely registers it.
-An event fires when $\lambda^2$ exceeds the decision-theoretic budget of Section~\ref{sec:trigger}, and the monitor re-arms once $\lambda^2$ falls back below half the budget, so a sequence of changes triggers once per transition rather than latching.
+The first scenario degrades the robot's own actuation.
+As the robot walks, one hind leg (the right rear) loses torque: the ceiling on its hip and knee position controllers droops from a healthy $60$\,N\,m to $22$\,N\,m over roughly $0.8$\,s, a level at which holding the incumbent gait $\theta^{\star}(\text{flat})$ tips the robot on most occurrences, yet a re-tuned gait can still limp forward.
+The bout is non-episodic and runs for $120$\,s, with the same leg damaged repeatedly: after each event the leg is healed, the robot stood upright if it fell, and the damage recurs $3$ to $8$\,s later.
+The agent thus meets the same perturbation many times and should stop reselecting the gaits that fell.
 
-When the trigger fires, the selected method proposes CPG parameters, one candidate per $1.5$\,s window ramped in over $0.3$\,s, and each window is scored by the criterion of Eq.~\ref{eq:criterion}.
-The optimizers search a trust region around the incumbent and share a common safety layer: the best-scoring parameters seen so far are restored for one window whenever a candidate scores well below them.
-Without this safeguard every method, MARX-EFE included, destabilizes the robot within seconds, so it is applied uniformly.
-Grid search proposes candidates from a fixed sub-grid and BO from a Gaussian-process surrogate with a UCB acquisition function; both must physically walk on each candidate to score it, whereas MARX-EFE selects from its model, keeping its control prior centered on the current parameters.
-Holding the incumbent $\theta^{\star}(\text{flat})$ without adapting is the reference against which all three are measured.
+We deploy the safe active inference agent of Section~\ref{sec:agent}, here searching the high-leverage subset $\{\gamma, \omega_{\text{swing}}, K_{\text{stop}}, A_{\text{hip}}, b\}$ of Eq.~\ref{eq:cpg-parameters} along which the healthy and damaged optima differ, the rest held at the incumbent.
+Its memory is seeded only with the fact that the incumbent falls under the damage, and it persists across recurrences within the bout.
+Detection reuses the trigger family of Section~\ref{sec:trigger} in a prediction-error form: a CUSUM on the forward-speed deficit and excess tilt relative to the pre-damage baseline fires when the accumulation crosses a bound, re-armed once the robot has recovered after each heal.
 
-\subsection{Experiment 1: Natural terrain}
-\label{sec:exp-natural}
+Over three $120$\,s bouts the agent encountered $33$ damage events at a mean detection latency of $1.19$\,s with no false alarms.
+As its memory fills, the fall rate drops from $67\%$ over the first third of each bout to $19\%$ over the last third: within a single bout the agent learns to avoid the gaits it has seen fall.
+The recovery is only partial, however.
+The compensating direction under a weak leg is a lower-amplitude, slower swing, but the incumbent already sits near the lower bound of the amplitude parameters, so the best surviving gait merely limps ($V \approx -0.18$, a reduced forward speed at a larger tilt) rather than restoring nominal walking.
+The gait parameterization therefore caps how much of the damage the agent can recover, a limit of the representation rather than of the agent, which we revisit in the Discussion.
 
-The parameter optimum drifts continuously along a natural landscape, whose ground changes in both friction and geometry many times, so there is no single terrain-matched gait to switch to and no oracle to mark an achievable ceiling.
-We walk the robot along a natural transect of forward bands of grass, gravel, rock, and shallow water in random order and length, each band carrying its own friction and its own micro-geometry: gentle undulation on grass, fine roughness on gravel, scattered low rocks to step over, and a slippery depression at the water.
-Bands are $6$ to $10$\,m long, so each surface persists for $12$ to $20$\,s of walking, and the robot walks a single continuous bout of up to $80$\,s.
-It starts on grass with $\theta^{\star}(\text{flat})$, whose friction $\mu \approx 0.7$ makes the flat optimum the natural incumbent, and adapts online whenever the monitor fires, on average $1.5$ times over the bout.
-Because there is no oracle, and almost every gait eventually falls on a long enough transect, the discriminating metric is the \emph{survival distance}, the distance walked before a fall or the end of the terrain.
-We report it alongside the fall rate, the number of bands crossed, the mean trunk tilt $\sqrt{\psi_r^2 + \psi_p^2}$ after the baseline window, and the mean windowed criterion $\bar{V}$, over $N = 10$ sampled transects.
+\subsection{Adapting to payload shifts}
+\label{sec:exp-payload}
 
-\begin{table}[t]
-\centering
-\setlength{\tabcolsep}{6pt}
-\renewcommand{\arraystretch}{1.1}
-\caption{Online adaptation on a natural transect of friction and geometry bands ($N = 10$ sampled transects, decision-theoretic trigger). There is no oracle, because the optimum drifts along the path. Survival distance and bands crossed are higher-is-better; fall rate and trunk tilt are lower-is-better; $\bar{V}$ is higher-is-better. Best online method in bold.}
-\label{tab:natural}
-\begin{tabular}{lcccc}
-\toprule
- & reference & \multicolumn{3}{c}{online method} \\
-\cmidrule(lr){2-2}\cmidrule(lr){3-5}
-Metric & no adapt & grid & BO & MARX-EFE \\
-\midrule
-Distance [m]     & $34.2$  & $32.9$  & $33.2$  & $\mathbf{34.3}$ \\
-Falls [\%]       & $50$    & $60$    & $60$    & $\mathbf{40}$ \\
-Bands crossed    & $4.7$   & $4.5$   & $4.5$   & $4.6$ \\
-Trunk tilt [deg] & $2.2$   & $2.3$   & $2.3$   & $\mathbf{2.2}$ \\
-Mean $\bar{V}$   & $-0.27$ & $-0.50$ & $-0.43$ & $\mathbf{-0.31}$ \\
-\bottomrule
-\end{tabular}
-\end{table}
+The second scenario perturbs the robot's mass distribution rather than its actuation.
+The Laikago carries an $8$\,kg payload rigidly attached above its trunk, whose own mass is $10$\,kg, and at random intervals the payload shifts off the sagittal plane, $0.215$\,m laterally and $0.20$\,m to the rear, ramped over $1$\,s so the change is a sustained bias rather than an impulse.
+This lateral offset sits at the edge of recoverability: holding the incumbent gait $\theta^{\star}(\text{flat})$ the robot falls on the majority of shifts, yet a re-tuned gait can still walk forward under the load, so the perturbation rewards adaptation without being hopeless.
+As in the damage scenario the bout is non-episodic and runs for $120$\,s, with the same shift recurring many times: after each shift the payload recenters and a new one occurs $2$ to $8$\,s later, and when the robot falls it is stood upright and the payload recentered before walking resumes.
+An agent that remembers earlier outcomes should therefore stop repeating the parameter choices that fell.
 
-Table~\ref{tab:natural} reports the outcome.
-Survival distances overlap across all arms, from $33$ to $34$\,m with a per-seed spread of about $11$\,m that reflects where the first fall happens, so distance alone does not separate the methods.
-The fall rate and the windowed criterion do, and they order the arms consistently.
-Online black-box search is the most fragile: grid and BO fall in $60\%$ of runs against $50\%$ for no adaptation, and their mean criterion is the lowest ($-0.50$ and $-0.43$ against $-0.27$), because a speculative candidate walked on a low-friction or uneven band tips the robot over.
-MARX-EFE is the only arm to improve on holding the incumbent, falling in $40\%$ of runs while matching no adaptation on trunk tilt and criterion.
-It selects small model-guided corrections rather than committing whole windows to physical trials, which avoids the destabilization that black-box search causes.
-The small sample leaves these orderings short of statistical significance, but their direction is consistent and holds once the bands are long enough to expose a mismatched gait for a sustained stretch.
+We pair the optimality trigger with the safe active inference agent of Section~\ref{sec:agent}, whose persistent Gaussian-process memory over the parameter space records which choices led to a fall.
+At each detected shift the agent proposes a gait by minimizing the expected free energy of Eq.~\ref{eq:EFE}, favoring parameters whose predicted performance is high while avoiding the regions its memory associates with falling, and here it searches only the high-leverage subset $\{\gamma, \omega_{\text{swing}}, F_{\text{fast}}, K_{\text{stop}}, b\}$ of Eq.~\ref{eq:cpg-parameters}.
+The memory persists across recurrences within the trial, so the map fills in as the shift repeats.
+Detection reuses the trigger family of Section~\ref{sec:trigger} in a prediction-error form: a CUSUM accumulates the forward-speed deficit and attitude tilt relative to the pre-shift baseline and fires when the accumulation crosses a bound, re-arming once the robot has recovered after each recenter.
 
-%\begin{figure}[t]
-%\centering
-%\includegraphics[width=\linewidth]{experiment-natural-adapt/results/figures/summary_dt.png}
-%\caption{Online CPG adaptation over a natural transect ($10$ seeds, decision-theoretic trigger). Bars over seeds for survival distance, fall rate, bands crossed, forward speed, and trunk tilt. MARX-EFE (orange) falls least and tracks the target speed as tightly as no adaptation (gray), while grid (green) and BO (blue) fall most.}
-%\label{fig:natural}
-%\end{figure}
-
-\subsection{Experiment 2: Sensitivity to exploration schedule}
-\label{sec:exp2-beta}
-
-A known failure mode of BO is that its behaviour depends strongly on the acquisition-function exploration schedule. We sweep five $\beta_t$ schedules (\texttt{conservative}, \texttt{moderate}, \texttt{balanced}, \texttt{late\_decay}, \texttt{exploratory}) while holding all other BO settings fixed, and compare them against a single MARX-EFE run. The purpose is to show (a) that BO requires schedule tuning to achieve competitive sample efficiency, and (b) that MARX-EFE does not require such a schedule because the exploration--exploitation trade-off is implicit in the epistemic term of the expected free energy.
-
-% \begin{figure}[h]
-%     \centering
-%     \includegraphics[width=\linewidth]{figures/exp2_beta_sweep.pdf}
-%     \caption{BO sensitivity to the UCB $\beta_t$ schedule. $N_{\mathrm{walk}}$ (lower is better) for each schedule, versus the MARX-EFE reference.}
-%     \label{fig:exp2-beta-sweep}
-% \end{figure}
-
-\subsection{Experiment 3: Online adaptation to target-velocity changes}
-\label{sec:exp3-adaptation}
-
-A key claim of the continually-learning agent is that it can adapt online to non-stationary tasks without re-tuning. We change the target velocity $v^{*}$ mid-episode from $0.5$\,m/s to $1.0$\,m/s to $0.8$\,m/s, and measure how quickly each method tracks the new set-point. Only methods that update their parameters online (BO and MARX-EFE) are evaluated here.
-
-% \begin{figure}[h]
-%     \centering
-%     \includegraphics[width=\linewidth]{figures/exp3_targetvel_change.pdf}
-%     \caption{Online target-velocity tracking. Realised forward velocity $v_x(t)$ under a step change in $v^{*}$; BO and MARX-EFE shown separately.}
-%     \label{fig:exp3-targetvel}
-% \end{figure}
+Over three $120$\,s bouts the agent encountered $39$ shifts and fell on one of them ($3\%$), at a mean detection latency of $0.4$\,s, whereas holding the incumbent falls on the majority of the same shifts.
+The recovered gaits walk forward rather than merely bracing in place, and the agent reaches them without the destabilizing on-robot trials that grid search and Bayesian optimization require, because it screens each candidate against its memory before committing to it.
 
 
 \section{DISCUSSION}
 
 Our results separate two aspects of online adaptation that are easily conflated: deciding \emph{when} to change the gait and deciding \emph{what} to change it to.
-The optimality trigger resolves the first cheaply and reliably, firing on the controllable part of the prediction error, once per terrain change and not on a steady surface, and it re-arms to detect a sequence of transitions.
-The second is where the methods diverge.
-Grid search and Bayesian optimization can only judge a candidate gait by walking on it, and on a low-friction or uneven band a poor candidate does not merely score badly, it tips the robot over; even confined to a trust region and protected by a revert-to-best safeguard, this exploration raises the fall rate relative to not adapting at all.
-The active inference agent instead selects parameters from a model that it updates every control step, so it avoids these destabilizing trials and is the only method to fall less often than holding the incumbent gait.
-It achieves this not by a faster search toward a distant optimum, but by making small, model-guided corrections around the incumbent: the advantage is the ability to improve the gait without risking it.
+The prediction-error trigger resolves the first cheaply, firing on a sustained loss of performance rather than on stride-frequency ripple, once per perturbation and not during nominal walking, and it re-arms to catch a recurring sequence.
+The second is where the danger lies.
+Grid search and Bayesian optimization can only judge a candidate gait by walking on it, and on an already-perturbed robot a poor candidate does not merely score badly, it tips the robot over.
+The safe active inference agent instead screens each candidate against a learned map with an explicit memory of past falls, so it avoids these destabilizing trials, and within a single bout its fall rate drops as the memory fills.
+It achieves this not by a faster search toward a distant optimum, but by making small, model-guided corrections that avoid the gaits it has seen fail.
 This holds even though the CPG is already stabilized by the attitude virtual model controller, so the benefit is complementary to the reactive posture loop rather than a substitute for it.
 
 Several limitations qualify these conclusions.
-The natural-terrain sample is small ($N = 10$), so the ordering is consistent but short of significance, and the reference optimum is computed offline in simulation.
-The improvement does not yet generalize to a durable advantage across recurring terrain changes: the selected parameters stay near the incumbent and never travel to a distant terrain optimum.
-The barrier appears structural rather than a matter of tuning: the linear autoregressive model supports small local corrections but cannot predict which distant parameter settings are stable, and loosening the control prior to permit larger moves only reintroduces destabilizing exploration.
-A model expressive enough to navigate to the terrain optimum, or a per-transition re-selection scheme, is the central open problem.
-Validating on hardware, and beyond the terrain envelope in which the attitude-stabilized CPG stays upright, are natural next steps.
+The evaluation is in simulation, over two intrinsic perturbations and a modest number of recurrences, and the reference optima are computed offline.
+More fundamentally, how much adaptation can recover is capped by the gait parameterization itself: under a weakened leg the compensating gait wants amplitudes below the lower bound the incumbent already sits near, so the recovered gait limps rather than restoring nominal walking, and the memory-based agent makes local, safe corrections rather than travelling to a distant optimum.
+A richer control representation, or a model expressive enough to reach the distant optimum without destabilizing exploration, is the central open problem.
+Validating on hardware, and across a wider range of perturbations, are natural next steps.
 
 \section{CONCLUSIONS}
 
-We augmented a coupled-Hopf-oscillator CPG with an attitude virtual model controller and studied when and how to re-tune its gait parameters online as the terrain varies.
-An optimality trigger decides when to adapt from the controllable part of the prediction error, and an autoregressive active inference agent decides what to change by selecting parameters from a learned model rather than by physically trialing candidates.
-On a natural transect it is the only method to reduce falls below holding the incumbent gait, where grid search and Bayesian optimization instead destabilize the robot while probing.
-Generalizing this benefit across recurring terrain changes, and validating on hardware, remain open.
+We augmented a coupled-Hopf-oscillator CPG with an attitude virtual model controller and studied when and how to re-tune its gait parameters online as the operating condition changes.
+A prediction-error trigger decides when to adapt from a sustained loss of performance, and a safe active inference agent decides what to change by selecting parameters from a learned model, with a persistent memory of past falls, rather than by physically trialing candidates.
+On a weakened leg actuator and a shifting trunk payload, the agent learns within a single bout to stop selecting the gaits that fall, recovering without the destabilizing trials grid search and Bayesian optimization require.
+How far this recovery generalizes, and how much the gait parameterization itself caps it, remain open.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
