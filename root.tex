@@ -300,7 +300,7 @@ fitted to a memory $\mathcal{D}_k = \{(\theta_j, V_j)\}_{j<k}$ of the gaits trie
 Conditioning on $\mathcal{D}_k$ gives a Gaussian posterior predictive with mean $\mu(\theta)$ and variance $\sigma^2(\theta)$ at any candidate gait, over observation noise $\sigma_n^2$.
 To keep the map learnable from the few queries a single bout provides, only the high-leverage subset of the parameters of Eq.~\ref{eq:cpg-parameters} is searched, the rest held at the incumbent; the memory persists across recurrences of the shift, so the map fills in as the same condition is met again and no gait is ever supplied in advance.
 
-The agent selects the next gait by minimizing an expected free energy, following the NARX--EFE control of \cite{kouw2023information}.
+The agent selects the next gait by minimizing an expected free energy functional \cite{meera2026curvature}.
 A goal prior $\bar{p}(V) = \cN(V \given y^{\star}, \tau^2)$ encodes the preferred outcome $y^{\star}$, an optimistic target performance, with tolerance $\tau^2$.
 Under the Gaussian posterior predictive, the expected free energy of a candidate gait is
 \begin{align} \label{eq:EFE}
