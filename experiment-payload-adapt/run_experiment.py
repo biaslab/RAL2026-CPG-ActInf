@@ -7,10 +7,14 @@ run_continual / run_gpsafe trio). One long, non-episodic bout on flat ground:
   * after the first few seconds the payload SHIFTS off the sagittal plane
     (rearward + lateral, ramped ~1 s) -- a persistent asymmetric CoM offset;
   * a prediction-error CUSUM detects the shift and the chosen METHOD responds;
-  * the response is held under the full shift for a few seconds and scored;
-  * on a FALL the robot is stood back upright at its current position and the
-    payload is RECENTERED (event reverted); either way, after a random 2-8 s the
-    shift recurs. Search-based methods carry their memory across recurrences.
+  * the shift PERSISTS -- it is never auto-reverted. Only a FALL reverts it: the
+    robot is stood back upright at its position, the payload is RECENTERED, and
+    after a random 2-8 s gap the shift re-engages (the next fall cycle). A method
+    that adapts and does not fall keeps walking under the shift for the rest of
+    the bout. Search-based methods carry their memory across recurrences.
+
+Headline metric = FALLS PER BOUT: no-adapt tips over repeatedly; a good adapter
+falls rarely.
 
 Five arms (event_responders.ALL_ARMS), all searching the same reduced CPG
 dims (FREE_DIMS_PAYLOAD) so the comparison is head-to-head:
@@ -21,11 +25,12 @@ dims (FREE_DIMS_PAYLOAD) so the comparison is head-to-head:
   safegp  -> the safe GP recovery agent (methods.gp_safe_agent);
   oracle  -> jump to the pre-fit post-shift optimum (upper anchor).
 
-Per event we record fall / stability (RMS body tilt + composite score V) /
-distance travelled; results are written for the analysis notebook to load:
+Per event (each ends at a fall, or at the bout end for a surviving gait) we
+record fall / stability (RMS body tilt) / distance; results are written for the
+analysis notebook (analyze.ipynb) to load:
   results/continual_events.csv   one row per event, tagged with `method`/`seed`
-  results/continual_summary.csv  per-method aggregates (fall rate, tilt, distance)
-  results/logs/<method>_seed<k>.npz   per-seed step traces (for time-series plots)
+  results/continual_summary.csv  per-method aggregates (falls/bout, tilt, distance)
+  results/logs/<method>_seed<k>.npz   per-seed step traces (incl. cumulative falls)
 
 Usage (from repo root):
     python experiment-payload-adapt/run_experiment.py --seeds 5 --duration 120
@@ -76,6 +81,10 @@ SHIFT_BACK = 0.20          # world -Y (rearward) shift when engaged [m]
 SHIFT_RAMP_T = 1.0         # shift is ramped over this long [s] (no impulse)
 CONSTRAINT_FORCE = 2000.0  # fixed-constraint maxForce [N]
 SETTLE_STEPS = 60          # upright-reset settle [steps]
+# The shift persists until a fall; EVAL_HOLD is only the trailing window (s) over
+# which a SURVIVING gait's stability score V is measured for the responder's
+# memory -- NOT an auto-revert timer.
+EVAL_HOLD = 10.0
 
 UPRIGHT_FALL = 0.30        # world-up . body-up below which = tip-over
 HEIGHT_FALL = 0.25         # base height below which = collapsed [m] (flat ground)
@@ -249,6 +258,10 @@ def main():
     ap.add_argument("--arms", nargs="+", default=er.ALL_ARMS, choices=er.ALL_ARMS)
     ap.add_argument("--seeds", type=int, default=5)
     ap.add_argument("--duration", type=float, default=120.0)
+    ap.add_argument("--eval-hold", type=float, default=EVAL_HOLD,
+                    help="trailing window [s] for scoring a SURVIVING gait's V "
+                         "(memory feedback); NOT an auto-revert timer -- the shift "
+                         "persists until a fall regardless")
     ap.add_argument("--mass", type=float, default=PAYLOAD_MASS, help="payload mass [kg]")
     ap.add_argument("--lat", type=float, default=SHIFT_LAT, help="lateral shift [m]")
     ap.add_argument("--back", type=float, default=SHIFT_BACK, help="rearward shift [m]")
@@ -283,6 +296,10 @@ def main():
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs(LOG_DIR, exist_ok=True)
+    import glob
+    for _arm in a.arms:            # drop stale per-seed logs (e.g. a prior larger
+        for _f in glob.glob(os.path.join(LOG_DIR, f"{_arm}_seed*.npz")):  # --seeds run)
+            os.remove(_f)
     incumbent = load_incumbent()
     oracle_target = load_oracle_target()
     if "oracle" in a.arms and oracle_target is None:
@@ -294,13 +311,14 @@ def main():
     physics_kw = dict(mass=a.mass, lat=a.lat, back=a.back)
     cfg = cd.BoutConfig(dt=DT, duration=a.duration, gap_min=a.gap_min,
                         gap_max=a.gap_max, event_ramp_t=SHIFT_RAMP_T,
+                        eval_hold=a.eval_hold,
                         use_detector=not a.no_detector, detect_tau=a.detect_tau,
                         detect_kappa=a.detect_kappa, detect_h=a.detect_h,
                         grace=a.grace)
 
     print(f"continual payload-shift adaptation: arms={a.arms} x {a.seeds} seeds "
-          f"x {a.duration:g}s; {a.mass:g}kg shift ({a.lat:g} lat, {a.back:g} back) "
-          f"recurring every {a.gap_min:g}-{a.gap_max:g}s")
+          f"x {a.duration:g}s; {a.mass:g}kg shift ({a.lat:g} lat, {a.back:g} back), "
+          f"persists until a fall; re-engages {a.gap_min:g}-{a.gap_max:g}s after each")
     print(f"  incumbent: {np.round(incumbent, 3).tolist()}")
     print(f"  searching dims {free} ({[PARAM_NAMES[i] for i in free]})")
     det = ("idealised (react at onset)" if a.no_detector else
@@ -312,6 +330,8 @@ def main():
     for arm in a.arms:
         arm_events = []
         arm_dists = []
+        arm_edists = []
+        arm_falls = []
         for s in range(a.seeds):
             log, events, n_false, n_reset = run_seed(
                 s, arm, physics_kw, cfg, incumbent, box, free, oracle_target, a)
@@ -321,10 +341,13 @@ def main():
             n = len(events)
             nf = sum(e["fell"] for e in events)
             dist = float(log["y"][-1] - log["y"][0]) if len(log["y"]) else 0.0
+            edist = float(sum(e["dist"] for e in events))   # distance under shift
             arm_dists.append(dist)
-            print(f"  [{arm:7s} seed{s}] {n:2d} events, {nf} falls "
-                  f"({nf/max(n,1):.0%}); trial distance {dist:5.1f} m; "
-                  f"false alarms {n_false}; silent resets {n_reset}", flush=True)
+            arm_edists.append(edist)
+            arm_falls.append(nf)
+            print(f"  [{arm:7s} seed{s}] {nf:2d} falls/bout over {n} events; "
+                  f"trial distance {dist:5.1f} m; silent resets {n_reset}",
+                  flush=True)
             for i, e in enumerate(events):
                 row = dict(method=arm, seed=s, event=i + 1,
                            onset=e["onset"], detect=e["detect"],
@@ -336,18 +359,20 @@ def main():
                     row[PARAM_NAMES[j]] = float(e["cand"][j])
                 all_rows.append(row)
         # per-method aggregate (real events only, i.e. not false alarms)
-        real = [e for evs in arm_events for e in evs if not e["false_alarm"]]
-        n = len(real)
-        fr = float(np.mean([e["fell"] for e in real])) if n else float("nan")
-        surv = [e for e in real if not e["fell"]]
-        tilt = float(np.mean([e["tilt_rms"] for e in surv
-                              if e["tilt_rms"] == e["tilt_rms"]])) if surv else float("nan")
-        meanV = float(np.mean([e["V"] for e in real])) if n else float("nan")
-        summary.append(dict(method=arm, n_events=n, fall_rate=fr,
-                            mean_tilt_surv=tilt, mean_V=meanV,
+        allev = [e for evs in arm_events for e in evs]
+        surv = [e for e in allev if not e["fell"] and e["tilt_rms"] == e["tilt_rms"]]
+        tilt = float(np.mean([e["tilt_rms"] for e in surv])) if surv else float("nan")
+        fpb = float(np.mean(arm_falls))
+        fpb_sem = float(np.std(arm_falls, ddof=1) / np.sqrt(len(arm_falls))) \
+            if len(arm_falls) > 1 else 0.0
+        summary.append(dict(method=arm, n_seeds=a.seeds,
+                            falls_per_bout=fpb, falls_sem=fpb_sem,
+                            mean_tilt_surv=tilt,
+                            mean_dist_under_fault=float(np.mean(arm_edists)),
                             mean_trial_dist=float(np.mean(arm_dists))))
-        print(f"  == {arm:7s}: fall rate {fr:.0%}  mean surviving tilt {tilt:.1f} deg  "
-              f"mean V {meanV:+.2f}  mean distance {np.mean(arm_dists):.1f} m ==\n")
+        print(f"  == {arm:7s}: {fpb:.1f} falls/bout  mean surviving tilt {tilt:.1f} deg  "
+              f"dist-under-fault {np.mean(arm_edists):.1f} m "
+              f"(total {np.mean(arm_dists):.1f} m) ==\n")
 
     # ── write results for the analysis notebook ──────────────────────────────
     ev_csv = os.path.join(RESULTS_DIR, "continual_events.csv")
@@ -361,8 +386,9 @@ def main():
             w.writerow({c: r.get(c, "") for c in cols})
     sm_csv = os.path.join(RESULTS_DIR, "continual_summary.csv")
     with open(sm_csv, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["method", "n_events", "fall_rate",
-                                          "mean_tilt_surv", "mean_V",
+        w = csv.DictWriter(f, fieldnames=["method", "n_seeds", "falls_per_bout",
+                                          "falls_sem", "mean_tilt_surv",
+                                          "mean_dist_under_fault",
                                           "mean_trial_dist"])
         w.writeheader()
         for r in summary:

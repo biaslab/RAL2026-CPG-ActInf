@@ -6,38 +6,48 @@ flat ground:
 
   * the robot walks normally with all legs healthy;
   * after the first few seconds one hind leg (RR) is DAMAGED -- its hip+knee
-    actuator maxForce ramps 60 -> 22 Nm over ~1 s (Cully et al. leg-damage
-    setting), a persistent asymmetric under-actuation;
+    actuator maxForce ramps 60 -> 20 Nm over ~1 s, a persistent asymmetric
+    under-actuation that fells the symmetric incumbent (4/4);
   * a prediction-error CUSUM detects the damage and the chosen METHOD responds;
-  * the response is held under full damage for a few seconds and scored;
-  * on a FALL the robot is stood back upright at its current position and the leg
-    is HEALED (event reverted); either way, after a random 2-8 s the damage
-    recurs. Search-based methods carry their memory across recurrences.
+  * the damage PERSISTS -- it is never auto-healed. Only a FALL reverts it: the
+    robot is stood back upright at its position, the leg is HEALED, and after a
+    random 2-8 s gap the damage re-engages (the next fall cycle). A method that
+    adapts and does not fall keeps walking under the damage for the rest of the
+    bout. Search-based methods carry their memory across recurrences.
 
-Five arms (event_responders.ALL_ARMS), all searching the same reduced CPG dims
+Headline metric = FALLS PER BOUT: no-adapt tips over every ~time-to-fall seconds
+and racks up many falls; a good adapter falls rarely.
+
+PER-LEG CONTROL (the key to a fair leg-damage story): the CPG's hip amplitude is
+split into one value per leg (methods.marxefe_optimizer.PerLegCPG, an 11-D control
+vector), so the agent CAN compensate the asymmetric fault -- drop the weak leg's
+swing amplitude and lean on the others. The no-adapt incumbent is this same
+controller with all four hip amplitudes EQUAL (the symmetric flat-optimal gait),
+which cannot express that compensation and so fails. With a single GLOBAL hip
+amplitude there is no regime where no-adapt fails AND a recovery is findable
+(the asymmetry is irreducible); per-leg control opens a broad, findable recovery.
+
+Five arms (event_responders.ALL_ARMS), all searching the 4 per-leg hip amplitudes
 (FREE_DIMS_DAMAGE) so the comparison is head-to-head:
 
-  noadapt -> hold the flat-optimal gait (lower anchor);
+  noadapt -> hold the symmetric flat-optimal gait (lower anchor; falls under damage);
   grid    -> Latin-hypercube proposals (naive search);
   bo      -> GP-UCB on the per-event stability score;
   safegp  -> the safe GP recovery agent (methods.gp_safe_agent);
-  oracle  -> jump to the pre-fit post-damage optimum (upper anchor).
+  oracle  -> jump to the pre-fit per-leg recovery gait (upper anchor).
 
-Because the 8 CPG params are GLOBAL/symmetric, the controller cannot command more
-torque to the weak leg; compensation is indirect (slower gait, smaller amplitude,
-higher STOP_GAIN). Whether the parameterisation can express a compensating gait
-at all is what fit_damage_oracles.py screens (at 22 Nm on a hind leg it can).
-
-Per event we record fall / stability (RMS body tilt + composite score V) /
-distance travelled; results are written for the analysis notebook to load:
+Per event (each ends at a fall, or at the bout end for a surviving gait) we
+record fall / stability (RMS body tilt) / distance; results are written for the
+analysis notebook (analyze.ipynb) to load:
   results/continual_events.csv   one row per event, tagged with `method`/`seed`
-  results/continual_summary.csv  per-method aggregates (fall rate, tilt, distance)
-  results/logs/<method>_seed<k>.npz   per-seed step traces (for time-series plots)
+  results/continual_summary.csv  per-method aggregates (falls/bout, tilt, distance)
+  results/logs/<method>_seed<k>.npz   per-seed step traces (incl. cumulative falls)
 
 Usage (from repo root):
     python experiment-damage-adapt/run_experiment.py --seeds 5 --duration 120
     python experiment-damage-adapt/run_experiment.py --arms noadapt safegp oracle
-    # oracle arm needs results/damage_optima.json (python fit_damage_oracles.py)
+    # oracle arm reads the per-leg recovery gait from results/damage_optima.json
+    # (refit over the 4 per-leg hip amplitudes at the damage force)
 """
 
 import argparse
@@ -62,15 +72,22 @@ FIG_DIR = os.path.join(RESULTS_DIR, "figures")
 OPTIMA_JSON = os.path.join(RESULTS_DIR, "damage_optima.json")
 INCUMBENT_JSON = os.path.join(RESULTS_DIR, "incumbent.json")
 
-PARAM_NAMES = ["coupling", "w_swing", "w_stance", "F_FAST", "STOP", "hipA", "kneeA", "b"]
+# PER-LEG control (11-D): the global hip amplitude is split into one per leg so an
+# asymmetric leg fault can be compensated (see methods.marxefe_optimizer.PerLegCPG).
+PARAM_NAMES = ["coupling", "w_swing", "w_stance", "F_FAST", "STOP",
+               "hipA_FL", "hipA_FR", "hipA_RL", "hipA_RR", "kneeA", "b"]
 
-# The flat-optimal incumbent (from the now-archived experiment-flat BO fit). Kept
+# The flat-optimal incumbent (archived experiment-flat BO fit), 8-D global; kept
 # here so the folder is self-contained; overridable via results/incumbent.json.
-INCUMBENT = np.array([7.607, 13.0498, 25.0, 52.4044, 0.5, 0.1, 0.5, 10.0])
+# Expanded to the 11-D per-leg layout (all four hip amplitudes equal) by
+# load_incumbent -- so the no-adapt anchor is the symmetric gait that fails.
+INCUMBENT8 = np.array([7.607, 13.0498, 25.0, 52.4044, 0.5, 0.1, 0.5, 10.0])
 
-# CPG dims safegp searches (gp_safe_agent.FREE_DIMS_DEFAULT): coupling, w_swing,
-# STOP, hipA, b -- the high-leverage dims for a slow, low-amplitude recovery gait.
-FREE_DIMS_DAMAGE = [0, 1, 4, 5, 7]
+# safeGP/grid/bo search the 4 PER-LEG hip amplitudes (indices 5-8): the agent can
+# drop the weak leg's swing amplitude and lean on the others -- the compensation
+# the global-symmetric incumbent cannot express. (Feasibility 2026-07: at 20 Nm
+# the global incumbent falls 4/4 while a per-leg gait recovers + travels ~10 m.)
+FREE_DIMS_DAMAGE = [5, 6, 7, 8]
 
 # ── Leg-damage scenario defaults (screened 2026-07; see README) ──────────────
 DT = 0.01
@@ -78,23 +95,32 @@ LEG_NAMES = ["FL", "FR", "RL", "RR"]
 DEFAULT_ORI = [0.0, 0.5, 0.5, 0.0]
 DAMAGE_LEG = "RR"          # which leg's hip+knee weaken (a hind leg by default)
 HEALTHY_FORCE = 60.0       # hip+knee maxForce before damage [Nm] (~ uncapped)
-DAMAGE_FORCE = 22.0        # hip+knee maxForce under full damage [Nm]
+DAMAGE_FORCE = 20.0        # hip+knee maxForce under full damage [Nm]: at 20 the
+                           # global-symmetric incumbent falls fast (4/4) while a
+                           # per-leg gait can recover (per-leg CPG regime)
 ABD_FORCE = 500.0          # abduction hold force [Nm]; left INTACT
 DAMAGE_RAMP_T = 1.0        # torque droop ramped over this long [s] (no impulse)
 SETTLE_STEPS = 60          # upright-reset settle [steps]
+# The damage persists until a fall; EVAL_HOLD is only the trailing window (s)
+# over which a SURVIVING gait's stability score V is measured for the responder's
+# memory -- NOT an auto-heal timer.
+EVAL_HOLD = 12.0
 
 UPRIGHT_FALL = 0.30        # world-up . body-up below which = tip-over
 HEIGHT_FALL = 0.25         # base height below which = collapsed [m] (flat ground)
 
 
 def load_incumbent():
-    if os.path.exists(INCUMBENT_JSON):
-        return np.asarray(json.load(open(INCUMBENT_JSON))["params"], float)
-    return INCUMBENT.copy()
+    """The 11-D per-leg incumbent: the symmetric flat-optimal gait (all four hip
+    amplitudes equal). Sourced from results/incumbent.json (8-D) if present."""
+    from methods.marxefe_optimizer import PerLegCPG
+    p8 = (np.asarray(json.load(open(INCUMBENT_JSON))["params"], float)
+          if os.path.exists(INCUMBENT_JSON) else INCUMBENT8)
+    return PerLegCPG.expand8(p8)
 
 
 def load_oracle_target():
-    """Post-damage optimum (oracle arm); None if not yet fit."""
+    """Post-damage optimum (oracle arm), 11-D per-leg; None if not yet fit."""
     if not os.path.exists(OPTIMA_JSON):
         return None
     return np.asarray(json.load(open(OPTIMA_JSON))["damaged"]["params"], float)
@@ -116,9 +142,9 @@ class DamagePhysics:
         import pybullet as p
         from methods import terrain
         from methods.marxefe_optimizer import (load_environment, load_robot,
-                                               JointCPG)
+                                               PerLegCPG)
         self._p = p
-        JointCPG.ATTITUDE_FEEDBACK = True
+        PerLegCPG.ATTITUDE_FEEDBACK = True
         terrain.TERRAIN_CONFIG = {"kind": "flat"}
         load_environment(DT, use_gui=False)
         self.robot, _, self.jids, _, self.feet = load_robot(p)
@@ -171,7 +197,7 @@ class DamagePhysics:
         """Stand the robot upright at (x,y); fresh CPG. The leg heals implicitly
         (event intensity frac ramps back to 0 -> force back to healthy_force)."""
         p = self._p
-        from methods.marxefe_optimizer import JointCPG
+        from methods.marxefe_optimizer import PerLegCPG as JointCPG
         rng = np.random.default_rng(10_000 + int(seed))
         jit = rng.normal(0.0, 0.002, size=12)
         p.resetBasePositionAndOrientation(self.robot, [at_xy[0], at_xy[1], 0.55],
@@ -223,6 +249,10 @@ def main():
     ap.add_argument("--arms", nargs="+", default=er.ALL_ARMS, choices=er.ALL_ARMS)
     ap.add_argument("--seeds", type=int, default=5)
     ap.add_argument("--duration", type=float, default=120.0)
+    ap.add_argument("--eval-hold", type=float, default=EVAL_HOLD,
+                    help="trailing window [s] for scoring a SURVIVING gait's V "
+                         "(memory feedback); NOT an auto-heal timer -- damage "
+                         "persists until a fall regardless")
     ap.add_argument("--leg", default=DAMAGE_LEG, choices=["FL", "FR", "RL", "RR"],
                     help="which leg's hip+knee weaken (a HIND leg gives a real gap)")
     ap.add_argument("--healthy-force", type=float, default=HEALTHY_FORCE,
@@ -260,25 +290,31 @@ def main():
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs(LOG_DIR, exist_ok=True)
+    import glob
+    for _arm in a.arms:            # drop stale per-seed logs (e.g. a prior larger
+        for _f in glob.glob(os.path.join(LOG_DIR, f"{_arm}_seed*.npz")):  # --seeds run)
+            os.remove(_f)
     incumbent = load_incumbent()
     oracle_target = load_oracle_target()
     if "oracle" in a.arms and oracle_target is None:
         raise SystemExit("oracle arm needs results/damage_optima.json "
                          "(run: python experiment-damage-adapt/fit_damage_oracles.py)")
     from methods.cpg_bounds import bounds_lower, bounds_upper
-    box = (bounds_lower.numpy(), bounds_upper.numpy())
+    from methods.marxefe_optimizer import PerLegCPG
+    box = PerLegCPG.expand_box(bounds_lower.numpy(), bounds_upper.numpy())
     free = a.free_dims if a.free_dims is not None else FREE_DIMS_DAMAGE
     physics_kw = dict(leg=a.leg, healthy_force=a.healthy_force,
                       damage_force=a.damage_force)
     cfg = cd.BoutConfig(dt=DT, duration=a.duration, gap_min=a.gap_min,
                         gap_max=a.gap_max, event_ramp_t=DAMAGE_RAMP_T,
+                        eval_hold=a.eval_hold,
                         use_detector=not a.no_detector, detect_tau=a.detect_tau,
                         detect_kappa=a.detect_kappa, detect_h=a.detect_h,
                         grace=a.grace)
 
     print(f"continual leg-damage adaptation: arms={a.arms} x {a.seeds} seeds "
-          f"x {a.duration:g}s; {a.leg} {a.healthy_force:g}->{a.damage_force:g} Nm "
-          f"recurring every {a.gap_min:g}-{a.gap_max:g}s")
+          f"x {a.duration:g}s; {a.leg} {a.healthy_force:g}->{a.damage_force:g} Nm, "
+          f"persists until a fall; re-engages {a.gap_min:g}-{a.gap_max:g}s after each")
     print(f"  incumbent: {np.round(incumbent, 3).tolist()}")
     print(f"  searching dims {free} ({[PARAM_NAMES[i] for i in free]})")
     det = ("idealised (react at onset)" if a.no_detector else
@@ -290,6 +326,8 @@ def main():
     for arm in a.arms:
         arm_events = []
         arm_dists = []
+        arm_edists = []
+        arm_falls = []
         for s in range(a.seeds):
             log, events, n_false, n_reset = run_seed(
                 s, arm, physics_kw, cfg, incumbent, box, free, oracle_target, a)
@@ -299,10 +337,13 @@ def main():
             n = len(events)
             nf = sum(e["fell"] for e in events)
             dist = float(log["y"][-1] - log["y"][0]) if len(log["y"]) else 0.0
+            edist = float(sum(e["dist"] for e in events))   # distance under fault
             arm_dists.append(dist)
-            print(f"  [{arm:7s} seed{s}] {n:2d} events, {nf} falls "
-                  f"({nf/max(n,1):.0%}); trial distance {dist:5.1f} m; "
-                  f"false alarms {n_false}; silent resets {n_reset}", flush=True)
+            arm_edists.append(edist)
+            arm_falls.append(nf)
+            print(f"  [{arm:7s} seed{s}] {nf:2d} falls/bout over {n} events; "
+                  f"trial distance {dist:5.1f} m; silent resets {n_reset}",
+                  flush=True)
             for i, e in enumerate(events):
                 row = dict(method=arm, seed=s, event=i + 1,
                            onset=e["onset"], detect=e["detect"],
@@ -313,18 +354,20 @@ def main():
                 for j in free:
                     row[PARAM_NAMES[j]] = float(e["cand"][j])
                 all_rows.append(row)
-        real = [e for evs in arm_events for e in evs if not e["false_alarm"]]
-        n = len(real)
-        fr = float(np.mean([e["fell"] for e in real])) if n else float("nan")
-        surv = [e for e in real if not e["fell"]]
-        tilt = float(np.mean([e["tilt_rms"] for e in surv
-                              if e["tilt_rms"] == e["tilt_rms"]])) if surv else float("nan")
-        meanV = float(np.mean([e["V"] for e in real])) if n else float("nan")
-        summary.append(dict(method=arm, n_events=n, fall_rate=fr,
-                            mean_tilt_surv=tilt, mean_V=meanV,
+        allev = [e for evs in arm_events for e in evs]
+        surv = [e for e in allev if not e["fell"] and e["tilt_rms"] == e["tilt_rms"]]
+        tilt = float(np.mean([e["tilt_rms"] for e in surv])) if surv else float("nan")
+        fpb = float(np.mean(arm_falls))
+        fpb_sem = float(np.std(arm_falls, ddof=1) / np.sqrt(len(arm_falls))) \
+            if len(arm_falls) > 1 else 0.0
+        summary.append(dict(method=arm, n_seeds=a.seeds,
+                            falls_per_bout=fpb, falls_sem=fpb_sem,
+                            mean_tilt_surv=tilt,
+                            mean_dist_under_fault=float(np.mean(arm_edists)),
                             mean_trial_dist=float(np.mean(arm_dists))))
-        print(f"  == {arm:7s}: fall rate {fr:.0%}  mean surviving tilt {tilt:.1f} deg  "
-              f"mean V {meanV:+.2f}  mean distance {np.mean(arm_dists):.1f} m ==\n")
+        print(f"  == {arm:7s}: {fpb:.1f} falls/bout  mean surviving tilt {tilt:.1f} deg  "
+              f"dist-under-fault {np.mean(arm_edists):.1f} m "
+              f"(total {np.mean(arm_dists):.1f} m) ==\n")
 
     # ── write results for the analysis notebook ──────────────────────────────
     ev_csv = os.path.join(RESULTS_DIR, "continual_events.csv")
@@ -338,8 +381,9 @@ def main():
             w.writerow({c: r.get(c, "") for c in cols})
     sm_csv = os.path.join(RESULTS_DIR, "continual_summary.csv")
     with open(sm_csv, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["method", "n_events", "fall_rate",
-                                          "mean_tilt_surv", "mean_V",
+        w = csv.DictWriter(f, fieldnames=["method", "n_seeds", "falls_per_bout",
+                                          "falls_sem", "mean_tilt_surv",
+                                          "mean_dist_under_fault",
                                           "mean_trial_dist"])
         w.writeheader()
         for r in summary:

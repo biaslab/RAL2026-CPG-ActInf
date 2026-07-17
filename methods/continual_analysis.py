@@ -3,13 +3,19 @@
 Loads the `results/continual_events.csv` written by either experiment's
 `run_experiment.py` and produces the paper figures:
 
-  method_comparison.<ext>  fall rate / stability (RMS body tilt) / distance per
-                           method, mean +/- SEM across seeds (the headline);
-  learning_curve.<ext>     fall rate vs event ordinal within the trial -- shows
-                           the search-based arms thinning out falls as memory
-                           fills, while the anchors stay flat;
+  method_comparison.<ext>  falls per bout / stability (RMS body tilt) / distance
+                           per method, mean +/- SEM across seeds (the headline);
+  falls_over_time.<ext>    mean cumulative falls vs time per method -- no-adapt
+                           climbs steadily, a method that learns a recovery gait
+                           plateaus, the oracle stays flat;
   timeseries_seed0.<ext>   forward-speed trace (seed 0) per method with the event
-                           windows shaded and falls marked.
+                           windows shaded.
+
+NB: the event persists until a fall (see run_experiment), so the headline metric
+is FALLS PER BOUT, not a per-event fall fraction. Distance here is DISTANCE UNDER
+THE PERTURBATION (sum of per-event onset->fall/end progress), NOT total bout
+distance -- otherwise a failing method is rewarded for the fast healthy walking
+between its falls.
 
 Both experiments share the same output schema, so this module is experiment-
 agnostic; each folder's `analyze.py` just passes its results dir + a couple of
@@ -65,21 +71,24 @@ def methods_present(rows):
 # ── per-method / per-seed aggregation ────────────────────────────────────────
 
 def _per_seed(rows, method):
-    """Per-seed metrics for one method (real events only): fall rate, mean
-    surviving tilt, trial distance. Returns dict seed -> (fr, tilt, dist)."""
+    """Per-seed metrics for one method: FALLS PER BOUT (count), mean surviving
+    RMS tilt, and DISTANCE UNDER THE PERTURBATION (sum of per-event forward
+    progress from event onset to the fall/bout-end). The latter credits ground
+    covered while coping with the fault -- unlike total bout distance, it does
+    NOT reward a failing method for the fast healthy walking between its falls.
+    Returns dict seed -> (n_falls, tilt, event_dist)."""
     seeds = sorted({r["seed"] for r in rows if r["method"] == method})
     out = {}
     for s in seeds:
-        real = [r for r in rows if r["method"] == method and r["seed"] == s
-                and not r["false_alarm"]]
-        if not real:
+        evs = [r for r in rows if r["method"] == method and r["seed"] == s]
+        if not evs:
             continue
-        fr = float(np.mean([r["fell"] for r in real]))
-        surv = [r["tilt_rms"] for r in real if not r["fell"]
+        n_falls = int(sum(r["fell"] for r in evs))
+        surv = [r["tilt_rms"] for r in evs if not r["fell"]
                 and np.isfinite(r["tilt_rms"])]
         tilt = float(np.mean(surv)) if surv else np.nan
-        dist = float([r["trial_dist"] for r in real][0])
-        out[s] = (fr, tilt, dist)
+        event_dist = float(sum(r["dist"] for r in evs if np.isfinite(r["dist"])))
+        out[s] = (n_falls, tilt, event_dist)
     return out
 
 
@@ -93,23 +102,23 @@ def _mean_sem(vals):
 
 
 def summary_table(rows):
-    """Per-method (mean, sem) for fall rate, surviving tilt, trial distance."""
+    """Per-method (mean, sem) across seeds for falls-per-bout, surviving tilt,
+    trial distance."""
     tab = {}
     for m in methods_present(rows):
         ps = _per_seed(rows, m)
-        frs = [v[0] for v in ps.values()]
+        falls = [v[0] for v in ps.values()]
         tilts = [v[1] for v in ps.values()]
         dists = [v[2] for v in ps.values()]
-        tab[m] = dict(fall_rate=_mean_sem(frs), tilt=_mean_sem(tilts),
+        tab[m] = dict(falls=_mean_sem(falls), tilt=_mean_sem(tilts),
                       dist=_mean_sem(dists), n_seeds=len(ps),
-                      n_events=len([r for r in rows if r["method"] == m
-                                    and not r["false_alarm"]]))
+                      n_falls_total=int(sum(falls)))
     return tab
 
 
 def summary_dataframe(rows):
     """Per-method summary as a pandas DataFrame (nice inline display in a
-    notebook): fall rate [%], surviving RMS tilt [deg], distance [m], each as
+    notebook): falls per bout, surviving RMS tilt [deg], distance [m], each as
     mean and SEM across seeds."""
     import pandas as pd
     tab = summary_table(rows)
@@ -117,9 +126,8 @@ def summary_dataframe(rows):
     for m in methods_present(rows):
         t = tab[m]
         recs.append({
-            "method": LABELS[m], "seeds": t["n_seeds"], "events": t["n_events"],
-            "fall_rate_% ": 100.0 * t["fall_rate"][0],
-            "fall_rate_sem": 100.0 * t["fall_rate"][1],
+            "method": LABELS[m], "seeds": t["n_seeds"],
+            "falls_per_bout": t["falls"][0], "falls_sem": t["falls"][1],
             "tilt_deg": t["tilt"][0], "tilt_sem": t["tilt"][1],
             "dist_m": t["dist"][0], "dist_sem": t["dist"][1],
         })
@@ -154,9 +162,9 @@ def fig_comparison(rows, title, event_word, out_path=None):
 
     fig, axes = plt.subplots(1, 3, figsize=(11, 3.6))
     panels = [
-        ("fall_rate", "fall rate", lambda v: v * 100.0, "%", "{:.0f}"),
+        ("falls", "falls per bout", lambda v: v, "count", "{:.1f}"),
         ("tilt", "stability: RMS body tilt", lambda v: v, "deg", "{:.1f}"),
-        ("dist", "distance travelled", lambda v: v, "m", "{:.0f}"),
+        ("dist", "distance under perturbation", lambda v: v, "m", "{:.0f}"),
     ]
     for ax, (key, ylab, conv, unit, fmt) in zip(axes, panels):
         means = np.array([conv(tab[m][key][0]) for m in methods])
@@ -187,39 +195,47 @@ def fig_comparison(rows, title, event_word, out_path=None):
     return fig
 
 
-def fig_learning(rows, title, event_word, out_path=None):
-    """Fall rate vs event ordinal within the trial (pooled across seeds). Search
-    arms should thin out falls as memory fills; anchors stay flat. Saves to
-    out_path if given; returns the Figure."""
+def fig_falls_over_time(results_dir, title, event_word, out_path=None):
+    """Cumulative falls vs time, mean across seeds per method (from the per-seed
+    `logs/*.npz` `cum_falls` traces). No-adapt climbs steadily; a method that
+    learns a recovery gait plateaus; the oracle stays flat. Returns the Figure,
+    or None if the logs are absent."""
     plt = _style()
-    methods = methods_present(rows)
-    fig, ax = plt.subplots(figsize=(7.2, 4.0))
+    log_dir = os.path.join(results_dir, "logs")
+    methods = [m for m in METHOD_ORDER
+               if _seed_logs(log_dir, m)]
+    if not methods:
+        return None
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
     for m in methods:
-        real = [r for r in rows if r["method"] == m and not r["false_alarm"]]
-        ords = sorted({r["event"] for r in real})
-        xs, ys = [], []
-        for e in ords:
-            fe = [r["fell"] for r in real if r["event"] == e]
-            if len(fe) >= 1:
-                xs.append(e); ys.append(100.0 * float(np.mean(fe)))
-        if not xs:
+        curves, ts = [], []
+        for p in _seed_logs(log_dir, m):
+            d = np.load(p)
+            if "cum_falls" not in d.files:     # stale log from an older schema
+                continue
+            curves.append(d["cum_falls"]); ts.append(d["t"])
+        if not curves:
             continue
-        # light smoothing over a width-3 window for readability
-        ys = np.asarray(ys, float)
-        if len(ys) >= 3:
-            k = np.ones(3) / 3.0
-            ys = np.convolve(ys, k, mode="same")
-        ax.plot(xs, ys, marker=MARKERS[m], ls=LINESTYLES[m], color=PALETTE[m],
-                lw=1.8, ms=5, mec="#333333", mew=0.4, label=LABELS[m])
-    ax.set_xlabel(f"{event_word} event # within the trial")
-    ax.set_ylabel("fall rate [%]")
-    ax.set_ylim(-5, 105)
-    ax.set_title(title)
-    ax.legend(ncol=2, fontsize=8.5, loc="upper right")
+        # align on the shortest trace (bouts are the same duration => same length)
+        L = min(len(c) for c in curves)
+        t = ts[0][:L]
+        mean = np.mean([c[:L] for c in curves], axis=0)
+        ax.plot(t, mean, ls=LINESTYLES[m], color=PALETTE[m], lw=2.0,
+                label=LABELS[m])
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("cumulative falls (mean over seeds)")
+    ax.set_title(f"{title}: falls accumulating over the bout")
+    ax.legend(ncol=2, fontsize=8.5, loc="upper left")
+    ax.margins(x=0.01)
     fig.tight_layout()
     if out_path:
         fig.savefig(out_path, bbox_inches="tight")
     return fig
+
+
+def _seed_logs(log_dir, method):
+    import glob
+    return sorted(glob.glob(os.path.join(log_dir, f"{method}_seed*.npz")))
 
 
 def fig_timeseries(results_dir, title, event_word, seed=0, out_path=None):
@@ -271,13 +287,12 @@ def analyze(results_dir, title, event_word, ext="png"):
     rows = load_events(results_dir)
     tab = summary_table(rows)
     print(f"\n=== {title} ===")
-    print(f"{'method':<14}{'seeds':>6}{'events':>8}{'fall rate':>16}"
+    print(f"{'method':<14}{'seeds':>6}{'falls/bout':>18}"
           f"{'surv. tilt [deg]':>20}{'distance [m]':>18}")
     for m in methods_present(rows):
         t = tab[m]
-        fr = (100.0 * t["fall_rate"][0], 100.0 * t["fall_rate"][1])
-        print(f"{LABELS[m]:<14}{t['n_seeds']:>6}{t['n_events']:>8}"
-              f"{_fmt(fr) + ' %':>16}{_fmt(t['tilt']):>20}{_fmt(t['dist']):>18}")
+        print(f"{LABELS[m]:<14}{t['n_seeds']:>6}{_fmt(t['falls']):>18}"
+              f"{_fmt(t['tilt']):>20}{_fmt(t['dist']):>18}")
 
     fig_dir = os.path.join(results_dir, "figures")
     os.makedirs(fig_dir, exist_ok=True)
@@ -285,8 +300,9 @@ def analyze(results_dir, title, event_word, ext="png"):
     outs = []
     p1 = os.path.join(fig_dir, f"method_comparison.{ext}")
     fig_comparison(rows, title, event_word, out_path=p1); outs.append(p1)
-    p2 = os.path.join(fig_dir, f"learning_curve.{ext}")
-    fig_learning(rows, title, event_word, out_path=p2); outs.append(p2)
+    p2 = os.path.join(fig_dir, f"falls_over_time.{ext}")
+    if fig_falls_over_time(results_dir, title, event_word, out_path=p2) is not None:
+        outs.append(p2)
     p3 = os.path.join(fig_dir, f"timeseries_seed0.{ext}")
     if fig_timeseries(results_dir, title, event_word, out_path=p3) is not None:
         outs.append(p3)

@@ -763,6 +763,90 @@ class JointCPG:
             (float(g) for g in gains)
 
 
+class PerLegCPG(JointCPG):
+    """JointCPG variant with a PER-LEG hip amplitude, for the leg-damage
+    experiment. Identical oscillators / coupling / contact feedback / attitude
+    feedback -- the only change is that the single global ``hip_amp`` becomes a
+    4-vector (one per leg), so an asymmetric fault (a weak leg) can be compensated
+    by lowering that leg's swing amplitude (less torque demanded, less drag) and
+    leaning on the others -- a compensation the global-symmetric gait cannot
+    express. The global incumbent is this controller with all four hip amplitudes
+    equal, so no-adapt still fails under damage.
+
+    11-D parameter vector:
+      [coupling, w_swing, w_stance, F_FAST, STOP,
+       hipA_FL, hipA_FR, hipA_RL, hipA_RR, kneeA, b]
+    """
+
+    def step(self, params, raw_contacts, dt, roll=None, pitch=None):
+        coupling_gain, w_swing, w_stance, F_FAST, STOP_GAIN = params[:5]
+        hip_amp = np.asarray(params[5:9], float)      # per-leg (4,)
+        knee_amp, b = float(params[9]), float(params[10])
+        x_prev, y_prev = self.x.copy(), self.y.copy()
+
+        w_vec = w_stance / (np.exp(-b * y_prev) + 1.0) + w_swing / (np.exp(b * y_prev) + 1.0)
+        r_vec = np.sqrt(x_prev ** 2 + y_prev ** 2)
+        x_new = x_prev + dt * (self.ALPHA * (self.U - r_vec ** 2) * x_prev - w_vec * y_prev)
+
+        raw = np.asarray(raw_contacts, dtype=int)
+        for j in range(self.n):
+            if raw[j] == self.deb[j]:
+                self.cc[j] = 0
+            else:
+                self.cc[j] += 1
+            if self.cc[j] >= self.DEBOUNCE_THRESHOLD:
+                self.deb[j] = raw[j]
+                self.cc[j] = 0
+
+        phases = [self._get_phase(y_prev[j], j) for j in range(self.n)]
+        coupling_y = coupling_gain * (self.K @ y_prev)
+        u_fb = np.zeros(self.n)
+        for j in range(self.n):
+            in_stop = ((phases[j] == "swing" and self.deb[j] < 0.5) or
+                       (phases[j] == "stance" and self.deb[j] > 0.5))
+            if in_stop:
+                u_fb[j] = STOP_GAIN * (w_vec[j] * x_prev[j] - coupling_y[j])
+            elif phases[j] in ("swing", "stance"):
+                u_fb[j] = np.sign(y_prev[j]) * F_FAST
+
+        y_new = y_prev + dt * (self.BETA * (self.U - r_vec ** 2) * y_prev
+                               + w_vec * x_prev + coupling_y + u_fb)
+        self.x, self.y = x_new, y_new
+        hip_angles = self.HIP_OFFSET + hip_amp * x_new          # per-leg amplitude
+        knee_angles = self.KNEE_OFFSET - knee_amp * np.maximum(0.0, y_new)
+
+        if self.ATTITUDE_FEEDBACK and roll is not None and pitch is not None:
+            if not self._att_init:
+                self.prev_roll, self.prev_pitch = roll, pitch
+                self.pitch_ema = pitch
+                self._att_init = True
+            roll_rate = (roll - self.prev_roll) / dt
+            pitch_rate = (pitch - self.prev_pitch) / dt
+            self.prev_roll, self.prev_pitch = roll, pitch
+            self.pitch_ema += self.ATT_EMA_ALPHA * (pitch - self.pitch_ema)
+            d_pitch = pitch - self.pitch_ema
+            roll_cmd = self.ROLL_SIGN * (self.kp_roll * roll + self.kd_roll * roll_rate)
+            pitch_cmd = self.PITCH_SIGN * (self.kp_pitch * d_pitch + self.kd_pitch * pitch_rate)
+            knee_angles = knee_angles + np.clip(
+                self._FRONT * pitch_cmd + self._LEFT * roll_cmd,
+                -self.DKNEE_CLIP, self.DKNEE_CLIP)
+        return hip_angles, knee_angles
+
+    @staticmethod
+    def expand8(p8):
+        """8-D global gait -> 11-D per-leg (hip amplitude replicated across legs)."""
+        p8 = np.asarray(p8, float)
+        return np.concatenate([p8[:5], [p8[5]] * 4, [p8[6]], [p8[7]]])
+
+    @staticmethod
+    def expand_box(lo8, hi8):
+        """8-D box -> 11-D box (hip-amplitude bounds replicated across legs)."""
+        lo8, hi8 = np.asarray(lo8, float), np.asarray(hi8, float)
+        lo = np.concatenate([lo8[:5], [lo8[5]] * 4, [lo8[6]], [lo8[7]]])
+        hi = np.concatenate([hi8[:5], [hi8[5]] * 4, [hi8[6]], [hi8[7]]])
+        return lo, hi
+
+
 # Default and bounds for the 4 attitude-feedback gains (the adaptable channel):
 # [kp_roll, kd_roll, kp_pitch, kd_pitch]. Proportional gains dominate; derivative
 # gains are kept small (rate noise). Bounds bracket the validated defaults.

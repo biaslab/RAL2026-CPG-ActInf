@@ -59,7 +59,7 @@
 \title{\LARGE \bf
 % Online Bayesian optimization of central pattern generator parameters in quadrupedal robot locomotion
 %Continually learning central pattern generator parameters for quadrupedal robot locomotion with active inference agents
-Rapid event-triggered adaptation of central pattern generator parameters for quadrupedal robot locomotion 
+Event-triggered learning for adaptive central pattern generation\\ in quadrupedal robot locomotion 
 }
 
 
@@ -96,26 +96,22 @@ How far this recovery generalizes, and how much the gait parameterization itself
 
 % Efficient locomotion is crucial for animal survival, allowing predator evasion, foraging, and mating. Over millions of years, natural selection has refined both the morphologies and neural control systems of animals, allowing them to navigate in complex and unpredictable conditions with notable efficiency \cite{dickinson2000how}.
 
-Legged machines are increasingly asked to work through long, uninterrupted bouts of operation, and across such a bout the conditions they must cope with seldom hold still: the ground changes underfoot, a carried load shifts, an actuator wears down or is damaged. Each such event can turn a controller that was walking stably into one that stumbles, so the ability to keep going through it -- an adaptability animals display effortlessly -- is what separates a laboratory demonstration from a deployable machine. Engineers have long pursued this adaptability by replicating animal morphologies, such as snake-like robots for constrained spaces or quadruped platforms for irregular ground \cite{Pettersen2017SnakeRobots, dwivedula2025configbot}. These platforms inherit the mechanical advantages of their biological counterparts, but their control systems often do not: the Boston Dynamics quadruped Spot, for instance, relies on centralized, sensor-intensive controllers that are effective yet complex and expensive, limiting wider deployment \cite{dwivedula2025configbot}.
+Legged machines are increasingly asked to work through long, uninterrupted bouts of operation, across which the conditions seldom hold still: the ground changes underfoot, a carried load shifts, an actuator wears down. Each such event can turn a controller that was walking stably into one that stumbles, so the ability to keep going through it -- an adaptability animals display effortlessly -- separates a laboratory demonstration from a deployable machine. Engineers have long pursued it by replicating animal morphologies, from snake-like robots to quadrupeds for irregular ground \cite{pettersen2017snake, dwivedula2025configbot}, yet the control systems rarely inherit the biological advantage: Boston Dynamics' Spot, for instance, relies on centralized, sensor-intensive controllers that are effective but complex and costly, limiting wider deployment \cite{dwivedula2025configbot}.
 
-Central pattern generators (CPGs) offer a simpler alternative. In vertebrates, these spinal neural circuits generate the periodic, coordinated signals of movements such as walking, freeing higher brain centers to modulate speed and gait through simple inputs while sensory feedback keeps the rhythm coupled to the body and environment \cite{goulding2009circuits, dickinson2000how}. This decentralized architecture reduces command latency and bandwidth and simplifies high-level control \cite{CPG-Review}, making CPG-based controllers less energy intensive, simpler, and more affordable. The price of this simplicity is that the rhythm is shaped by only a handful of parameters held fixed during walking, and a setting that produces stable locomotion under one condition need not under another; when an event changes the condition mid-bout, staying upright requires re-tuning those parameters online. This paper studies when such re-tuning should be triggered and how the new parameters should be chosen without destabilizing the robot in the process.
+Central pattern generators (CPGs) offer a simpler alternative. In vertebrates, these spinal circuits generate the periodic, coordinated signals of movements such as walking, freeing higher brain centers to modulate speed and gait through simple inputs while sensory feedback keeps the rhythm coupled to body and environment \cite{goulding2009circuits, dickinson2000how}. This decentralized architecture lowers command latency and bandwidth and simplifies high-level control \cite{ijspeert2008special}, making CPG controllers simpler, cheaper, and less energy intensive. The price is that the rhythm is shaped by only a handful of parameters held fixed during walking, and a setting stable under one condition need not be under another; when an event changes the condition mid-bout, staying upright requires re-tuning those parameters online. This paper studies when that re-tuning should be triggered and how the new parameters should be chosen without destabilizing the robot.
 
 
 \subsection{Related Work}
 
-Among CPG models used in robotics, coupled nonlinear oscillators are biologically plausible and computationally efficient \cite{Richmond1994, CPG-Review}. Their mutual inhibition synchronizes the joints into coordinated gaits with smooth transitions between them \cite{Richmond1994, PassiveCompliant2008, PatternGenerators2008}, and their limit-cycle behavior yields self-sustaining oscillations that recover quickly from perturbations \cite{PassiveCompliant2008}. Governed by only a few parameters such as frequency and amplitude, they suit embedded systems with limited resources, yet most implementations still target high-end platforms, leaving their use on compact systems underexplored.
+Among CPG models used in robotics, coupled nonlinear oscillators are biologically plausible and computationally efficient \cite{collins1994hard, ijspeert2008special}: mutual inhibition synchronizes the joints into coordinated gaits with smooth transitions \cite{collins1994hard, sprowitz2008passive, righetti2008pattern}, and their limit cycles yield self-sustaining oscillations that recover quickly from perturbations \cite{sprowitz2008passive}. Governed by only a few parameters such as frequency and amplitude, they suit resource-limited embedded systems, though most implementations still target high-end platforms.
 
-An open-loop CPG generates stable rhythms on flat ground, but a change in the operating condition -- rougher or sloped ground, say -- induces body rotations that the rhythm alone cannot correct, so feedback is added to close the loop. Contact and load feedback resynchronize the oscillators to the actual footfalls \cite{PatternGenerators2008}, while posture feedback corrects the trunk attitude directly. Virtual model control (VMC) offers an intuitive route to the latter, computing joint actions as if virtual springs and dampers were attached to the body \cite{pratt2001virtual}. Ajallooeian et al.~augment a quadruped CPG with virtual springs that pull the trunk level, together with a stumbling-correction reflex, and thereby traverse unperceived rough terrain and slopes that defeat an open-loop CPG \cite{ajallooeian2013central}. We adopt this attitude VMC as a reactive posture layer beneath the CPG (Section~\ref{sec:vmc}) and ask a complementary question: given such a controller, when and how should the CPG's own gait parameters be re-tuned once the operating condition changes.
+An open-loop CPG walks stably on flat ground, but a change in operating condition -- rougher or sloped ground -- induces body rotations the rhythm alone cannot correct, so feedback closes the loop. Contact and load feedback resynchronize the oscillators to the actual footfalls \cite{righetti2008pattern}, while posture feedback corrects the trunk attitude. Virtual model control (VMC) computes joint actions as if virtual springs and dampers were attached to the body \cite{pratt2001virtual}; Ajallooeian et al.~use such springs to pull the trunk level, with a stumbling-correction reflex, traversing rough terrain and slopes that defeat an open-loop CPG \cite{ajallooeian2013central}. We adopt this attitude VMC as a reactive posture layer beneath the CPG (Section~\ref{sec:vmc}) and ask a complementary question: given it, when and how should the CPG's own gait parameters be re-tuned once the operating condition changes?
 
-Reactive feedback corrects momentary deviations but leaves the rhythm's parameters untouched, and when a change is large or persistent the parameters themselves must adapt. In animals this adaptation is most striking after injury, and a line of robotics work seeks to reproduce it. Cully et al.~let a damaged robot search a precomputed behavioral repertoire by intelligent trial and error, recovering a working gait within roughly a dozen physical trials and without a self-diagnosis of the damage \cite{cully2015robots}. In legged reinforcement learning, Kumar et al.~train an adaptation module that infers a latent encoding of the current condition from recent proprioception and adjusts a learned policy within a fraction of a second, coping with varied terrain, payloads, and actuator changes \cite{kumar2021rma}. Both adapt effectively, but each incurs a cost we wish to avoid: trial-and-error recovery evaluates a candidate behavior by physically executing it on the already-compromised robot, and the learned-policy approach depends on extensive simulated training and yields an opaque controller. We instead adapt the few interpretable parameters of a CPG online and model-based, screening each candidate against a memory of past failures rather than trialing it on the robot.
+Reactive feedback corrects momentary deviations but leaves the rhythm's parameters untouched; when a change is large or persistent the parameters themselves must adapt. Cully et al.~let a damaged robot search a precomputed behavioral repertoire by intelligent trial and error, recovering within roughly a dozen physical trials and without self-diagnosis \cite{cully2015robots}. In legged reinforcement learning, Kumar et al.~infer a latent encoding of the current condition from recent proprioception and adjust a learned policy within a fraction of a second, coping with varied terrain, payloads, and actuator changes \cite{kumar2021rma}. Each incurs a cost we avoid: trial-and-error evaluates a candidate by physically executing it on the already-compromised robot, and the learned-policy approach needs extensive simulated training and yields an opaque controller. We instead adapt the few interpretable CPG parameters online and model-based, screening each candidate against a memory of past failures rather than trialing it on the robot.
 
-A complementary line of work tunes gait parameters as black-box optimization, from measured performance rather than a model of the dynamics. Bayesian optimization suits this setting, where each walking trial is expensive: it fits a Gaussian-process surrogate to the parameter-score pairs seen so far and proposes the next parameters by maximizing an acquisition function such as the upper confidence bound. Run \emph{online}, it scores the parameters of the most recent window, augments the surrogate, and proposes the next window's parameters, refining the gait during walking; a trust region around the current best keeps proposals from jumping to destabilizing gaits \cite{eriksson2019scalable}. Like the trial-and-error recovery above, however, it can only score a candidate by walking on it. We take this online Bayesian optimization, together with grid search, as the black-box alternatives our model-based agent is contrasted against.
+A complementary line tunes gait parameters as black-box optimization, from measured performance rather than a model of the dynamics. Bayesian optimization suits this expensive-trial setting: it fits a Gaussian-process surrogate to the parameter-score pairs seen so far and proposes the next parameters by maximizing an acquisition function such as the upper confidence bound. Run \emph{online}, it scores the most recent window, augments the surrogate, and proposes the next window's parameters, a trust region keeping proposals from jumping to destabilizing gaits \cite{eriksson2019scalable}. Like the trial-and-error recovery above, though, it can only score a candidate by walking on it. We take online Bayesian optimization, with grid search, as the black-box alternatives our model-based agent is contrasted against.
 
-In the following, we contribute
-\begin{itemize}
-    \item a prediction-error trigger that decides \emph{when} to re-tune a central pattern generator, firing on a sustained loss of performance, and
-    \item a safe active inference agent that decides \emph{what} to re-tune to, selecting parameters from a learned model with a persistent memory of failed gaits and thereby avoiding the destabilizing on-robot trials that grid search and Bayesian optimization require.
-\end{itemize}
+We contribute two components: a prediction-error trigger that decides \emph{when} to re-tune a central pattern generator, firing on a sustained loss of performance; and a safe active inference agent that decides \emph{what} to re-tune to, selecting parameters from a learned model with a persistent memory of failed gaits, thereby avoiding the destabilizing on-robot trials that grid search and Bayesian optimization require.
 
 \section{PROBLEM STATEMENT}
 
@@ -126,15 +122,14 @@ This motivates online adaptation of the parameters as a requirement for resuming
 \subsection{Base platform and locomotion objective}
 \label{sec:base-platform}
 
-\begin{figure}[htb]
-\centering
-\input{problem-statement/laikago_schematic.tex}
-\caption{The Laikago quadruped, its trunk base state $\xi$, and the twelve leg joints driven by the CPG.}
-\label{fig:laikago}
-\end{figure}
+%\begin{figure}[htb]
+%\centering
+%\input{problem-statement/laikago_schematic.tex}
+%\caption{The Laikago quadruped, its trunk base state $\xi$, and the twelve leg joints driven by the CPG.}
+%\label{fig:laikago}
+%\end{figure}
 
-The robot is a floating base actuated through its legs.
-We describe the trunk by its base state
+The robot is a floating base actuated through its legs. We describe the trunk by its base state
 \begin{align}
   \xi = (p, \Psi, v, \omega) \,,
   \label{eq:base-state}
@@ -181,7 +176,7 @@ The coupling gain $\gamma$ strengthens the coordination between the limbs and re
 
 % Different gaits emerge from the choice of the coupling matrix. Figure~\ref{fig:coupling_matrices} illustrates the matrices for trot, pace, bound, and walk, each defining a distinct set of stable phase relationships.
 %
-The term $s_i$ closes a feedback loop on foot-contact timing \cite{PatternGenerators2008}.
+The term $s_i$ closes a feedback loop on foot-contact timing \cite{righetti2008pattern}.
 Leg $i$ is classified as swinging when $y_i$ exceeds a small positive threshold and as in stance below a small negative one, with a hysteresis band in between.
 Comparing this phase against the binary contact state of foot $i$ yields
 \begin{align}
@@ -369,13 +364,21 @@ The recovery is only partial, however.
 The compensating direction under a weak leg is a lower-amplitude, slower swing, but the incumbent already sits near the lower bound of the amplitude parameters, so the best surviving gait merely limps ($V \approx -0.18$, a reduced forward speed at a larger tilt) rather than restoring nominal walking.
 The gait parameterization therefore caps how much of the damage the agent can recover, a limit of the representation rather than of the agent, which we revisit in the Discussion.
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{payload_cumulative_falls.pdf}
+\caption{Cumulative falls over a $300$\,s continual bout under the persistent payload shift (mean $\pm$ std over ten seeds; final value in the legend). Holding the incumbent gait accrues falls throughout, whereas the safe active inference agent, grid search, and Bayesian optimization each find a load-tolerant gait early and then stop falling -- the agent soonest and with the fewest falls, as it screens candidates against its memory instead of trialing them on the robot. A clairvoyant oracle never falls.}
+\label{fig:payload-falls}
+\end{figure}
+
 \subsection{Adapting to payload shifts}
 \label{sec:exp-payload}
 
 The second scenario perturbs the robot's mass distribution rather than its actuation.
-The Laikago carries an $8$\,kg payload rigidly attached above its trunk, whose own mass is $10$\,kg, and at random intervals the payload shifts off the sagittal plane, $0.215$\,m laterally and $0.20$\,m to the rear, ramped over $1$\,s so the change is a sustained bias rather than an impulse.
-This lateral offset sits at the edge of recoverability: holding the incumbent gait $\theta^{\star}(\text{flat})$ the robot falls on the majority of shifts, yet a re-tuned gait can still walk forward under the load, so the perturbation rewards adaptation without being hopeless.
-As in the damage scenario the bout is non-episodic and runs for $120$\,s, with the same shift recurring many times: after each shift the payload recenters and a new one occurs $2$ to $8$\,s later, and when the robot falls it is stood upright and the payload recentered before walking resumes.
+The Laikago carries an $8$\,kg payload rigidly attached above its trunk, whose own mass is $10$\,kg, and at random intervals the payload shifts off the sagittal plane, $0.225$\,m laterally and $0.225$\,m to the rear, ramped over $1$\,s so the change is a sustained bias rather than an impulse.
+The offset then persists: once engaged it is held indefinitely, so the trunk bias compounds until the robot either falls or settles into a gait that tolerates the load.
+This offset sits at the edge of recoverability: holding the incumbent gait $\theta^{\star}(\text{flat})$ the robot tips over within roughly twenty seconds on nearly every shift, yet a re-tuned gait can stay upright under the load, so the perturbation rewards adaptation without being hopeless.
+The bout is non-episodic and runs for $300$\,s: whenever the robot falls it is stood upright and the payload recentered, and after $2$ to $8$\,s the shift recurs, so a controller that never adapts meets the same perturbation over and over, whereas one that finds a tolerant gait simply holds it and walks on.
 An agent that remembers earlier outcomes should therefore stop repeating the parameter choices that fell.
 
 We pair the optimality trigger with the safe active inference agent of Section~\ref{sec:agent}, whose persistent Gaussian-process memory over the parameter space records which choices led to a fall.
@@ -383,8 +386,13 @@ At each detected shift the agent proposes a gait by minimizing the expected free
 The memory persists across recurrences within the trial, so the map fills in as the shift repeats.
 Detection reuses the trigger family of Section~\ref{sec:trigger} in a prediction-error form: a CUSUM accumulates the forward-speed deficit and attitude tilt relative to the pre-shift baseline and fires when the accumulation crosses a bound, re-arming once the robot has recovered after each recenter.
 
-Over three $120$\,s bouts the agent encountered $39$ shifts and fell on one of them ($3\%$), at a mean detection latency of $0.4$\,s, whereas holding the incumbent falls on the majority of the same shifts.
-The recovered gaits walk forward rather than merely bracing in place, and the agent reaches them without the destabilizing on-robot trials that grid search and Bayesian optimization require, because it screens each candidate against its memory before committing to it.
+Because a tolerant gait, once found, simply keeps walking, we run ten $300$\,s bouts per method and report the \emph{cumulative} falls each accrues over a bout rather than a per-event rate (Fig.~\ref{fig:payload-falls}).
+Holding the incumbent, the robot falls $13.8 \pm 1.9$ times per bout: it never adapts and tips over on essentially every recurrence.
+The safe active inference agent instead falls only $0.7 \pm 0.9$ times, finding a tolerant gait after fewer than one fall on average and within the first $20$\,s, after which it holds that gait for the rest of the bout.
+The two black-box optimizers fall in between -- grid search $1.6 \pm 0.8$ and online Bayesian optimization $2.9 \pm 1.7$ times per bout -- more than the agent because each can only assess a candidate by executing it on the already-shifted robot, where a poor candidate tips it over rather than merely scoring badly; the Bayesian optimizer additionally spends its first trial re-testing the incumbent it has been told falls.
+A clairvoyant oracle that jumps straight to a pre-fit tolerant gait never falls, confirming a recoverable gait exists within the searched subset.
+Detection latency averaged $1.3$\,s.
+At this offset, however, the tolerant gaits the online methods reach brace against the load, holding position with the trunk level ($V \approx 0$) rather than restoring forward travel; as under actuator damage the benefit is thus measured in falls avoided, and reaching the distant gait that walks forward under the load is capped by the gait parameterization, as we discuss next.
 
 
 \section{DISCUSSION}
@@ -399,7 +407,8 @@ This holds even though the CPG is already stabilized by the attitude virtual mod
 
 Several limitations qualify these conclusions.
 The evaluation is in simulation, over two intrinsic perturbations and a modest number of recurrences, and the reference optima are computed offline.
-More fundamentally, how much adaptation can recover is capped by the gait parameterization itself: under a weakened leg the compensating gait wants amplitudes below the lower bound the incumbent already sits near, so the recovered gait limps rather than restoring nominal walking, and the memory-based agent makes local, safe corrections rather than travelling to a distant optimum.
+More fundamentally, how much adaptation can recover is capped by the gait parameterization itself: under a weakened leg the compensating gait wants amplitudes below the lower bound the incumbent already sits near, so the recovered gait limps rather than restoring nominal walking, and under a large payload offset the gait that would walk forward lies far from the incumbent, so the agent settles for a nearer gait that braces the load upright.
+In both, the memory-based agent makes local, safe corrections rather than travelling to a distant optimum.
 A richer control representation, or a model expressive enough to reach the distant optimum without destabilizing exploration, is the central open problem.
 Validating on hardware, and across a wider range of perturbations, are natural next steps.
 
