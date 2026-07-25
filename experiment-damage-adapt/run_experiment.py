@@ -53,8 +53,10 @@ Usage (from repo root):
 import argparse
 import csv
 import json
+import multiprocessing as mp
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
@@ -65,6 +67,7 @@ if _REPO not in sys.path:
 
 from methods import continual_driver as cd
 from methods import event_responders as er
+from methods import responder_worker as rw
 
 RESULTS_DIR = os.path.join(_HERE, "results")
 LOG_DIR = os.path.join(RESULTS_DIR, "logs")
@@ -190,8 +193,11 @@ class DamagePhysics:
         rot = p.getMatrixFromQuaternion(base_ori)
         upright = float(np.dot([0, 0, 1], rot[6:]))
         fell = (upright < UPRIGHT_FALL or base_pos[2] < HEIGHT_FALL)
+        # measured hip+knee joint positions (for the AIF agent's exogenous input)
+        ja = np.array([p.getJointState(self.robot, self.jids[L][j])[0]
+                       for L in LEG_NAMES for j in (1, 2)], float)
         return cd.StepState(base_pos=base_pos, vx=vel[1], roll=roll, pitch=pitch,
-                            fell=fell)
+                            fell=fell, vy=vel[0], joint_angles=ja)
 
     def _settle(self, at_xy, seed):
         """Stand the robot upright at (x,y); fresh CPG. The leg heals implicitly
@@ -222,32 +228,49 @@ class DamagePhysics:
         return JointCPG(n_legs=4)
 
 
-def build_responder(arm, incumbent, box, free, oracle_target, seed, args):
+def build_spec(arm, incumbent, box, free, oracle_target, seed, args):
+    """Picklable ResponderSpec for the out-of-process responder worker. The
+    incumbent is pre-seeded as a known post-damage FALL (bo/safegp) inside the
+    worker."""
     safegp_kwargs = dict(n_init=args.n_init, safe_V=args.safe_V, beta=args.beta,
                          kappa=args.kappa, objective=args.objective,
+                         r_fall=args.r_fall,
                          efe_y_star=args.efe_y_star, efe_tau2=args.efe_tau2,
                          efe_adaptive=args.efe_adaptive,
                          efe_tau2_min=args.efe_tau2_min,
                          efe_tau2_max=args.efe_tau2_max)
-    r = er.make_responder(arm, incumbent, box, free, oracle_target, seed,
-                          safegp_kwargs=safegp_kwargs)
-    # seed the search memory: the incumbent is a known post-damage FALL.
-    if arm in ("bo", "safegp"):
-        r.update(np.asarray(incumbent, float), cd.BoutConfig().v_fall, True)
-    return r
+    return rw.ResponderSpec(
+        name=arm, incumbent=np.asarray(incumbent, float), box=box,
+        free_dims=list(free), oracle_target=oracle_target, seed=int(seed),
+        safegp_kwargs=safegp_kwargs, seed_fall=(arm in ("bo", "safegp")),
+        v_fall=cd.BoutConfig().v_fall)
 
 
 def run_seed(seed, arm, physics_kw, cfg, incumbent, box, free, oracle_target, args):
     physics = DamagePhysics(**physics_kw)
-    responder = build_responder(arm, incumbent, box, free, oracle_target, seed, args)
-    return cd.run_event_bout(seed, responder, physics, incumbent, cfg)
+    if arm == "aif":                       # unified AIF agent: in-process, own trigger
+        from methods.aif_recovery import UnifiedAIFAgent
+        from methods.continual_driver_aif import run_event_bout_aif
+        agent = UnifiedAIFAgent(incumbent, box, free, seed, dt=cfg.dt,
+                                target_vx=cfg.target_vx)
+        return run_event_bout_aif(seed, agent, physics, incumbent, cfg)
+    spec = build_spec(arm, incumbent, box, free, oracle_target, seed, args)
+    return cd.run_event_bout(seed, spec, physics, incumbent, cfg)
 
 
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--arms", nargs="+", default=er.ALL_ARMS, choices=er.ALL_ARMS)
+    ap.add_argument("--arms", nargs="+", default=er.ALL_ARMS,
+                    choices=er.ALL_ARMS + ["aif"])
     ap.add_argument("--seeds", type=int, default=5)
+    ap.add_argument("--seed-start", type=int, default=0,
+                    help="first seed index (for slicing seeds across parallel "
+                         "workers); runs seed_start .. seed_start+seeds-1")
+    ap.add_argument("--out-dir", default=None,
+                    help="output directory for CSVs + per-seed logs (default "
+                         "results/); inputs (oracle/incumbent JSON) still read "
+                         "from results/. Use a per-worker dir for parallel runs")
     ap.add_argument("--duration", type=float, default=120.0)
     ap.add_argument("--eval-hold", type=float, default=EVAL_HOLD,
                     help="trailing window [s] for scoring a SURVIVING gait's V "
@@ -268,6 +291,10 @@ def main():
     ap.add_argument("--kappa", type=float, default=1.5)
     ap.add_argument("--objective", choices=["ucb", "efe"], default="efe",
                     help="safegp planning objective: GP-UCB or Expected Free Energy")
+    ap.add_argument("--r-fall", type=float, default=0.22,
+                    help="UCB fall-exclusion radius (normalized) around remembered "
+                         "falls; only used by objective=ucb. EFE has no such knob "
+                         "(safety emerges from the goal prior)")
     ap.add_argument("--efe-y-star", type=float, default=1.0)
     ap.add_argument("--efe-tau2", type=float, default=0.5)
     ap.add_argument("--efe-adaptive", action="store_true")
@@ -286,13 +313,26 @@ def main():
     ap.add_argument("--gap-max", type=float, default=8.0)
     ap.add_argument("--grace", type=float, default=1.5,
                     help="post-heal grace before re-arming the detector [s]")
+    ap.add_argument("--sim-speed", type=float, default=1.0,
+                    help="real-time pacing factor: the sim is paced to sim_speed x "
+                         "100 Hz so an optimizer taking T wall-seconds costs "
+                         "~T*sim_speed*100 sim steps of latency. 1.0 is physically "
+                         "faithful (a 120 s bout takes ~120 s wall); >1 runs faster "
+                         "but inflates the latency penalty; <=0 disables pacing")
+    ap.add_argument("--jobs", type=int, default=None,
+                    help="parallel bouts (ProcessPoolExecutor workers). Default "
+                         "max(1, cpu-2). Each bout is real-time paced so mostly "
+                         "idle; torch is pinned to 1 thread/responder so concurrent "
+                         "GP fits don't fight over cores")
     a = ap.parse_args()
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
+    out_results = a.out_dir if a.out_dir is not None else RESULTS_DIR
+    out_logs = os.path.join(out_results, "logs")
+    os.makedirs(out_results, exist_ok=True)
+    os.makedirs(out_logs, exist_ok=True)
     import glob
     for _arm in a.arms:            # drop stale per-seed logs (e.g. a prior larger
-        for _f in glob.glob(os.path.join(LOG_DIR, f"{_arm}_seed*.npz")):  # --seeds run)
+        for _f in glob.glob(os.path.join(out_logs, f"{_arm}_seed*.npz")):  # --seeds run)
             os.remove(_f)
     incumbent = load_incumbent()
     oracle_target = load_oracle_target()
@@ -310,7 +350,7 @@ def main():
                         eval_hold=a.eval_hold,
                         use_detector=not a.no_detector, detect_tau=a.detect_tau,
                         detect_kappa=a.detect_kappa, detect_h=a.detect_h,
-                        grace=a.grace)
+                        grace=a.grace, sim_speed=a.sim_speed)
 
     print(f"continual leg-damage adaptation: arms={a.arms} x {a.seeds} seeds "
           f"x {a.duration:g}s; {a.leg} {a.healthy_force:g}->{a.damage_force:g} Nm, "
@@ -321,65 +361,96 @@ def main():
            f"prediction-error CUSUM (kappa={a.detect_kappa}, h={a.detect_h})")
     print(f"  detector: {det}\n")
 
-    all_rows = []
-    summary = []
-    for arm in a.arms:
-        arm_events = []
-        arm_dists = []
-        arm_edists = []
-        arm_falls = []
-        for s in range(a.seeds):
-            log, events, n_false, n_reset = run_seed(
-                s, arm, physics_kw, cfg, incumbent, box, free, oracle_target, a)
-            arm_events.append(events)
-            np.savez_compressed(os.path.join(LOG_DIR, f"{arm}_seed{s}.npz"),
+    # ── run all (arm, seed) bouts in parallel (each is real-time paced) ───────
+    njobs = a.jobs if (a.jobs and a.jobs > 0) else max(1, (os.cpu_count() or 4) - 2)
+    seed_ids = list(range(a.seed_start, a.seed_start + a.seeds))
+    tasks = [(arm, s) for arm in a.arms for s in seed_ids]
+    est_wall = a.duration / a.sim_speed if a.sim_speed and a.sim_speed > 0 else 0.0
+    print(f"  {len(tasks)} bouts on {njobs} parallel workers "
+          f"(~{est_wall:.0f}s wall/bout at sim_speed={a.sim_speed:g}; "
+          f"~{len(tasks) / njobs * est_wall / 60:.0f} min total)\n", flush=True)
+
+    per = {}          # (arm, s) -> dict(events, dist, edist, nf, n_reset)
+    failed = []
+    done = 0
+    ctx = mp.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=njobs, mp_context=ctx) as ex:
+        futs = {ex.submit(run_seed, s, arm, physics_kw, cfg, incumbent, box,
+                          free, oracle_target, a): (arm, s)
+                for (arm, s) in tasks}
+        for fut in as_completed(futs):
+            arm, s = futs[fut]
+            done += 1
+            try:
+                log, events, n_false, n_reset = fut.result()
+            except Exception as e:            # one bad bout must not kill the run
+                failed.append((arm, s, repr(e)))
+                print(f"  [{done:3d}/{len(tasks)}] [{arm:7s} seed{s}] FAILED: {e!r}",
+                      flush=True)
+                continue
+            np.savez_compressed(os.path.join(out_logs, f"{arm}_seed{s}.npz"),
                                 **{k: v for k, v in log.items()})
-            n = len(events)
             nf = sum(e["fell"] for e in events)
             dist = float(log["y"][-1] - log["y"][0]) if len(log["y"]) else 0.0
             edist = float(sum(e["dist"] for e in events))   # distance under fault
-            arm_dists.append(dist)
-            arm_edists.append(edist)
-            arm_falls.append(nf)
-            print(f"  [{arm:7s} seed{s}] {nf:2d} falls/bout over {n} events; "
-                  f"trial distance {dist:5.1f} m; silent resets {n_reset}",
-                  flush=True)
-            for i, e in enumerate(events):
+            per[(arm, s)] = dict(events=events, dist=dist, edist=edist,
+                                 nf=nf, n_reset=n_reset)
+            print(f"  [{done:3d}/{len(tasks)}] [{arm:7s} seed{s}] {nf:2d} falls/bout "
+                  f"over {len(events)} events; trial distance {dist:5.1f} m; "
+                  f"silent resets {n_reset}", flush=True)
+    if failed:
+        print(f"\n  !! {len(failed)} bout(s) FAILED: "
+              f"{[(m, s) for m, s, _ in failed]}\n", flush=True)
+
+    # ── per-method aggregation (in arm/seed order -> deterministic CSV) ────────
+    all_rows = []
+    summary = []
+    for arm in a.arms:
+        seeds_ok = [s for s in seed_ids if (arm, s) in per]
+        arm_events = [per[(arm, s)]["events"] for s in seeds_ok]
+        arm_dists = [per[(arm, s)]["dist"] for s in seeds_ok]
+        arm_edists = [per[(arm, s)]["edist"] for s in seeds_ok]
+        arm_falls = [per[(arm, s)]["nf"] for s in seeds_ok]
+        for s in seeds_ok:
+            for i, e in enumerate(per[(arm, s)]["events"]):
                 row = dict(method=arm, seed=s, event=i + 1,
                            onset=e["onset"], detect=e["detect"],
                            latency=e["latency"], fell=e["fell"], V=e["V"],
                            tilt_rms=e["tilt_rms"], dist=e["dist"],
                            false_alarm=int(e["false_alarm"]),
-                           trial_dist=dist)
+                           request_t=e["request_t"],
+                           compute_latency=e["compute_latency"],
+                           trial_dist=per[(arm, s)]["dist"])
                 for j in free:
                     row[PARAM_NAMES[j]] = float(e["cand"][j])
                 all_rows.append(row)
         allev = [e for evs in arm_events for e in evs]
         surv = [e for e in allev if not e["fell"] and e["tilt_rms"] == e["tilt_rms"]]
         tilt = float(np.mean([e["tilt_rms"] for e in surv])) if surv else float("nan")
-        fpb = float(np.mean(arm_falls))
+        fpb = float(np.mean(arm_falls)) if arm_falls else float("nan")
         fpb_sem = float(np.std(arm_falls, ddof=1) / np.sqrt(len(arm_falls))) \
             if len(arm_falls) > 1 else 0.0
-        summary.append(dict(method=arm, n_seeds=a.seeds,
+        summary.append(dict(method=arm, n_seeds=len(seeds_ok),
                             falls_per_bout=fpb, falls_sem=fpb_sem,
                             mean_tilt_surv=tilt,
-                            mean_dist_under_fault=float(np.mean(arm_edists)),
-                            mean_trial_dist=float(np.mean(arm_dists))))
+                            mean_dist_under_fault=float(np.mean(arm_edists)) if arm_edists else float("nan"),
+                            mean_trial_dist=float(np.mean(arm_dists)) if arm_dists else float("nan")))
         print(f"  == {arm:7s}: {fpb:.1f} falls/bout  mean surviving tilt {tilt:.1f} deg  "
-              f"dist-under-fault {np.mean(arm_edists):.1f} m "
-              f"(total {np.mean(arm_dists):.1f} m) ==\n")
+              f"dist-under-fault {np.mean(arm_edists) if arm_edists else float('nan'):.1f} m "
+              f"(total {np.mean(arm_dists) if arm_dists else float('nan'):.1f} m) ==\n")
 
     # ── write results for the analysis notebook ──────────────────────────────
-    ev_csv = os.path.join(RESULTS_DIR, "continual_events.csv")
+    ev_csv = os.path.join(out_results, "continual_events.csv")
     cols = (["method", "seed", "event", "onset", "detect", "latency", "fell",
-             "V", "tilt_rms", "dist", "false_alarm", "trial_dist"]
+             "V", "tilt_rms", "dist", "false_alarm", "request_t",
+             "compute_latency", "trial_dist"]
             + [PARAM_NAMES[j] for j in free])
     with open(ev_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         for r in all_rows:
             w.writerow({c: r.get(c, "") for c in cols})
-    sm_csv = os.path.join(RESULTS_DIR, "continual_summary.csv")
+    sm_csv = os.path.join(out_results, "continual_summary.csv")
     with open(sm_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["method", "n_seeds", "falls_per_bout",
                                           "falls_sem", "mean_tilt_surv",
@@ -388,7 +459,7 @@ def main():
         w.writeheader()
         for r in summary:
             w.writerow(r)
-    print(f"saved {ev_csv}\nsaved {sm_csv}\nsaved per-seed traces in {LOG_DIR}")
+    print(f"saved {ev_csv}\nsaved {sm_csv}\nsaved per-seed traces in {out_logs}")
 
 
 if __name__ == "__main__":

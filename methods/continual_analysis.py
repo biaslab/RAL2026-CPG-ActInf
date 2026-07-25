@@ -44,14 +44,25 @@ LINESTYLES = {"noadapt": ":", "grid": "-", "bo": "-", "safegp": "-", "oracle": "
 
 # ── load ─────────────────────────────────────────────────────────────────────
 
+# fixed (non-parameter) columns; anything else in the header is a searched CPG
+# parameter (the candidate gait's free dims), captured per event as `params`.
+_FIXED_COLS = {"method", "seed", "event", "onset", "detect", "latency", "fell",
+               "V", "tilt_rms", "dist", "false_alarm", "request_t",
+               "compute_latency", "trial_dist"}
+
+
 def load_events(results_dir):
-    """Read continual_events.csv into a list of dicts with typed fields."""
+    """Read continual_events.csv into a list of dicts with typed fields. The
+    trailing parameter columns (the searched free dims) are captured as `params`
+    (a float array) so the search dynamics can be analysed."""
     path = os.path.join(results_dir, "continual_events.csv")
     if not os.path.exists(path):
         raise SystemExit(f"{path} not found; run run_experiment.py first")
     rows = []
     with open(path) as f:
-        for r in csv.DictReader(f):
+        reader = csv.DictReader(f)
+        param_cols = [c for c in (reader.fieldnames or []) if c not in _FIXED_COLS]
+        for r in reader:
             def fnum(k):
                 v = r.get(k, "")
                 return float(v) if v not in ("", None) else np.nan
@@ -59,7 +70,12 @@ def load_events(results_dir):
                              event=int(r["event"]), fell=int(r["fell"]),
                              V=fnum("V"), tilt_rms=fnum("tilt_rms"),
                              dist=fnum("dist"), trial_dist=fnum("trial_dist"),
-                             false_alarm=int(r["false_alarm"])))
+                             false_alarm=int(r["false_alarm"]),
+                             # async-driver timing (may be absent in older CSVs):
+                             onset=fnum("onset"), request_t=fnum("request_t"),
+                             compute_latency=fnum("compute_latency"),
+                             latency=fnum("latency"),
+                             params=np.array([fnum(c) for c in param_cols], float)))
     return rows
 
 
@@ -132,6 +148,147 @@ def summary_dataframe(rows):
             "dist_m": t["dist"][0], "dist_sem": t["dist"][1],
         })
     return pd.DataFrame(recs).set_index("method").round(2)
+
+
+# ── falls during search (the mechanism: destabilizing trials avoided) ─────────
+#
+# In this continual setting every fall is a candidate gait executed on the robot
+# that then tipped it -- a "destabilizing trial". The thesis is that the safe
+# agent avoids these by screening each candidate against a memory of past falls,
+# instead of re-testing gaits it has already seen fall. We quantify that two ways:
+#   (1) AVOIDABLE (repeat) falls -- the fraction of a bout's falls that re-crash a
+#       region already known to fall (a candidate within `eps`, in the normalized
+#       free-dim space, of an earlier failed candidate in the same bout). A memory
+#       that works drives this toward zero; a memoryless optimizer re-probes.
+#   (2) fall-rate DECAY -- falls in the first vs. second half of the bout. As the
+#       memory fills, a learning method should fall less later; a non-learning one
+#       stays flat.
+
+def _param_normalizers(rows):
+    P = np.array([r["params"] for r in rows
+                  if r["params"].size and np.all(np.isfinite(r["params"]))], float)
+    if P.size == 0:
+        return None, None
+    lo = P.min(axis=0)
+    rng = np.where(P.max(axis=0) > lo, P.max(axis=0) - lo, 1.0)
+    return lo, rng
+
+
+def search_summary(rows, eps=0.15, bout_duration=None):
+    """Per-method search dynamics (see block comment). `eps` is the normalized
+    free-dim distance within which two candidates count as the same failed region;
+    `bout_duration` (s) sets the early/late split (inferred from max onset if None).
+    Returns dict method -> dict(falls, repeat_frac, falls_early, falls_late), each
+    value a (mean, sem) across seeds."""
+    lo, rng = _param_normalizers(rows)
+    if bout_duration is None:
+        ons = [r["onset"] for r in rows if np.isfinite(r["onset"])]
+        bout_duration = max(ons) if ons else 0.0
+    half = bout_duration / 2.0
+    out = {}
+    for m in methods_present(rows):
+        seeds = sorted({r["seed"] for r in rows if r["method"] == m})
+        falls, rep, early, late = [], [], [], []
+        for s in seeds:
+            evs = sorted([r for r in rows if r["method"] == m and r["seed"] == s],
+                         key=lambda r: r["event"])
+            failed, n_fall, n_rep, e_e, e_l = [], 0, 0, 0, 0
+            for r in evs:
+                if not r["fell"]:
+                    continue
+                n_fall += 1
+                if lo is not None and np.all(np.isfinite(r["params"])):
+                    c = (r["params"] - lo) / rng
+                    if failed and min(np.linalg.norm(c - f) for f in failed) < eps:
+                        n_rep += 1
+                    failed.append(c)
+                if np.isfinite(r["onset"]):
+                    if r["onset"] < half:
+                        e_e += 1
+                    else:
+                        e_l += 1
+            falls.append(n_fall)
+            rep.append(n_rep / n_fall if n_fall else np.nan)
+            early.append(e_e)
+            late.append(e_l)
+        out[m] = dict(falls=_mean_sem(falls), repeat_frac=_mean_sem(rep),
+                      falls_early=_mean_sem(early), falls_late=_mean_sem(late))
+    return out
+
+
+def search_dataframe(rows, eps=0.15, bout_duration=None):
+    """Search-dynamics summary as a pandas DataFrame: falls per bout, avoidable
+    (repeat) fall fraction, and first- vs second-half falls."""
+    import pandas as pd
+    ss = search_summary(rows, eps=eps, bout_duration=bout_duration)
+    recs = []
+    for m in methods_present(rows):
+        t = ss[m]
+        recs.append({
+            "method": LABELS[m],
+            "falls_per_bout": t["falls"][0],
+            "avoidable_fall_frac": t["repeat_frac"][0],
+            "falls_first_half": t["falls_early"][0],
+            "falls_second_half": t["falls_late"][0],
+        })
+    return pd.DataFrame(recs).set_index("method").round(3)
+
+
+# ── async timing (detection vs. optimizer compute latency) ───────────────────
+
+def latency_summary(rows):
+    """Per-method async-driver timing. The responder runs OUT OF PROCESS, so a
+    detected event incurs (i) a detection/trigger latency (event onset -> CUSUM
+    fire = `request_t - onset`) and (ii) an optimizer COMPUTE latency (`request_t`
+    -> the gait actually applied = `compute_latency`), during which the robot
+    keeps walking on the un-adapted gait. Returns dict method -> dict with
+    det_latency (mean, sem) [s], compute_latency (median, p90, max) [s], and the
+    event count. Rows lacking the columns (older CSVs) are skipped gracefully."""
+    out = {}
+    for m in methods_present(rows):
+        evs = [r for r in rows if r["method"] == m and not r["false_alarm"]]
+        det = np.array([r["request_t"] - r["onset"] for r in evs
+                        if np.isfinite(r.get("request_t", np.nan))
+                        and np.isfinite(r.get("onset", np.nan))], float)
+        cl = np.array([r["compute_latency"] for r in evs
+                       if np.isfinite(r.get("compute_latency", np.nan))], float)
+        out[m] = dict(
+            det_latency=(_mean_sem(det) if len(det) else (np.nan, np.nan)),
+            cl_median=float(np.median(cl)) if len(cl) else np.nan,
+            cl_p90=float(np.percentile(cl, 90)) if len(cl) else np.nan,
+            cl_max=float(np.max(cl)) if len(cl) else np.nan,
+            n_events=len(evs))
+    return out
+
+
+def latency_dataframe(rows):
+    """Per-method async timing as a pandas DataFrame: detection latency [s]
+    (event onset -> trigger) and optimizer compute latency [s] (trigger -> gait
+    applied; median / p90 / max)."""
+    import pandas as pd
+    lat = latency_summary(rows)
+    recs = []
+    for m in methods_present(rows):
+        t = lat[m]
+        recs.append({
+            "method": LABELS[m], "events": t["n_events"],
+            "det_latency_s": t["det_latency"][0], "det_sem_s": t["det_latency"][1],
+            "compute_lat_median_s": t["cl_median"], "compute_lat_p90_s": t["cl_p90"],
+            "compute_lat_max_s": t["cl_max"],
+        })
+    return pd.DataFrame(recs).set_index("method").round(3)
+
+
+def overall_detection(rows):
+    """Mean detection latency [s] over ALL detected real events (any method) and
+    the total false-alarm count -- the paper's single 'detection averaged X s with
+    no false alarms' statement."""
+    det = np.array([r["request_t"] - r["onset"] for r in rows
+                    if not r["false_alarm"]
+                    and np.isfinite(r.get("request_t", np.nan))
+                    and np.isfinite(r.get("onset", np.nan))], float)
+    n_false = int(sum(r["false_alarm"] for r in rows))
+    return (float(np.mean(det)) if len(det) else np.nan, n_false, len(det))
 
 
 # ── figures ──────────────────────────────────────────────────────────────────
@@ -293,6 +450,18 @@ def analyze(results_dir, title, event_word, ext="png"):
         t = tab[m]
         print(f"{LABELS[m]:<14}{t['n_seeds']:>6}{_fmt(t['falls']):>18}"
               f"{_fmt(t['tilt']):>20}{_fmt(t['dist']):>18}")
+
+    # async-driver timing: detection (trigger) vs optimizer compute latency
+    lat = latency_summary(rows)
+    det_mean, n_false, n_det = overall_detection(rows)
+    print(f"\n  detection latency (onset->trigger): {det_mean:.2f} s over {n_det} "
+          f"events, {n_false} false alarms")
+    print(f"  {'method':<14}{'compute lat median':>20}{'p90':>8}{'max':>8}  [s]"
+          f"  (trigger->gait applied, out-of-process)")
+    for m in methods_present(rows):
+        t = lat[m]
+        print(f"  {LABELS[m]:<14}{t['cl_median']:>20.3f}{t['cl_p90']:>8.3f}"
+              f"{t['cl_max']:>8.3f}")
 
     fig_dir = os.path.join(results_dir, "figures")
     os.makedirs(fig_dir, exist_ok=True)

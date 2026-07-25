@@ -37,20 +37,32 @@ _ground_id = None
 SURFACES = {"ice": 0.15, "slick": 0.45, "normal": 0.7, "grip": 1.1, "rubber": 1.6}
 
 
+def _infinite_plane(p, mu=1.0):
+    """A truly infinite ground plane (body 0). Replaces plane.urdf, which is only
+    a finite +/-100 m plane: a robot that walks far enough forward drifts off it,
+    and an upright-reset then places it OFF the surface, so it falls through every
+    step (perpetual reset -> the event schedule stalls). GEOM_PLANE is unbounded, so
+    a forward-walking rollout never leaves the ground. `mu` matches plane.urdf's
+    lateral friction (1.0) so flat-terrain dynamics are unchanged where the robot
+    actually was (|y| < 100 m); only the far-drift off-plane artifact is removed."""
+    col = p.createCollisionShape(p.GEOM_PLANE, planeNormal=[0, 0, 1])
+    gid = p.createMultiBody(baseMass=0.0, baseCollisionShapeIndex=col)
+    p.changeDynamics(gid, -1, lateralFriction=float(mu))
+    return gid
+
+
 def build_ground(p):
     """Create the ground body and return its id. Must be called first so the
     ground is body 0."""
     global _ground_id
     kind = TERRAIN_CONFIG.get("kind", "flat")
     if kind == "flat":
-        _ground_id = p.loadURDF("plane.urdf")
+        _ground_id = _infinite_plane(p, mu=1.0)     # match plane.urdf friction
         return _ground_id
     if kind == "friction":
-        # Flat plane (body 0); friction is set per-step from the robot's forward
+        # Infinite plane (body 0); friction is set per-step from the robot's forward
         # position by apply_dynamic_friction. Start at the base friction.
-        _ground_id = p.loadURDF("plane.urdf")
-        p.changeDynamics(_ground_id, -1,
-                         lateralFriction=float(TERRAIN_CONFIG.get("base_mu", 0.7)))
+        _ground_id = _infinite_plane(p, mu=float(TERRAIN_CONFIG.get("base_mu", 0.7)))
         return _ground_id
     if kind == "sloped":
         # Single ramp: flat until slope_start_y, then up at slope_deg.

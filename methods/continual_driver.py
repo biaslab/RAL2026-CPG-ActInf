@@ -32,13 +32,21 @@ damage experiments share it exactly. The physics object must provide:
 `frac`=0 is the nominal (healthy) condition; `frac`=1 is the full event.
 """
 
+import time
 from collections import namedtuple
 
 import numpy as np
 
+from methods.responder_worker import ResponderWorker
+
 # Per-step physics readout returned by physics.actuate(): base position (x,y,z),
 # forward speed vx [m/s], body roll/pitch [rad], and whether the robot has fallen.
-StepState = namedtuple("StepState", ["base_pos", "vx", "roll", "pitch", "fell"])
+# `vy` (lateral speed) and `joint_angles` (measured hip+knee positions) are extra
+# fields used by the in-process AIF agent (continual_driver_aif); they default so
+# existing physics/responders that ignore them keep working unchanged.
+StepState = namedtuple("StepState", ["base_pos", "vx", "roll", "pitch", "fell",
+                                     "vy", "joint_angles"],
+                       defaults=[0.0, None])
 
 
 class BoutConfig:
@@ -52,9 +60,14 @@ class BoutConfig:
                  eval_hold=3.0, param_ramp=30, event_ramp_t=1.0,
                  use_detector=True, detect_tau=0.4, detect_kappa=0.20,
                  detect_h=1.8, arm_frac=0.70, arm_streak_t=0.5, grace=2.5,
-                 arm_timeout=6.0, detect_timeout=3.0):
+                 arm_timeout=6.0, detect_timeout=3.0, sim_speed=1.0):
         self.dt = float(dt)
         self.duration = float(duration)
+        # Real-time pacing factor: the sim loop is paced to sim_speed x 100 Hz so a
+        # propose() taking T wall-seconds maps to ~T*sim_speed/dt sim steps of
+        # latency. sim_speed=1.0 is physically faithful; larger runs faster but
+        # inflates the effective compute penalty; <=0 disables pacing (free-run).
+        self.sim_speed = float(sim_speed)
         self.target_vx = float(target_vx)
         self.v_fall = float(v_fall)
         self.gap_min, self.gap_max = float(gap_min), float(gap_max)
@@ -91,18 +104,28 @@ def _tilt_rms_deg(roll, pitch):
                                             + np.asarray(pitch) ** 2))))
 
 
-def run_event_bout(seed, responder, physics, incumbent, cfg):
+def run_event_bout(seed, responder_spec, physics, incumbent, cfg):
     """Run one continual bout for a single (seed, responder). Returns
     (log, events, n_false, n_reset). `log` is a dict of per-step traces
     (incl. `cum_falls`); `events` is a list of per-event outcome dicts with
     keys: onset, detect, latency, fell, V, tilt_rms, dist, cand, false_alarm,
-    mode. An "event" begins when the event engages and ends at the next fall (or
-    at the bout end for a surviving gait)."""
+    mode, request_t, compute_latency. An "event" begins when the event engages
+    and ends at the next fall (or at the bout end for a surviving gait).
+
+    The responder runs OUT OF PROCESS (methods.responder_worker): the sim loop
+    never blocks on propose()/update(). When the detector fires the loop posts a
+    propose-request tagged with the current event id and keeps walking on the
+    current gait; it applies the returned gait only once the worker delivers it,
+    so the wall-clock optimize time shows up as sim-step latency (logged as
+    `compute_latency`). `responder_spec` is a picklable ResponderSpec; the live
+    responder object is built inside the worker."""
     DT = cfg.dt
     incumbent = np.asarray(incumbent, float)
     rng = np.random.default_rng(777 + int(seed))
     tail_n = max(1, int(round(cfg.eval_hold / DT)))   # survival-scoring window
+    responder_mode = responder_spec.name              # == the arm's .mode
 
+    worker = ResponderWorker(responder_spec)
     cpg = physics.setup(seed)
 
     n_steps = int(round(cfg.duration / DT))
@@ -120,10 +143,14 @@ def run_event_bout(seed, responder, physics, incumbent, cfg):
     warm_vx, warm_tip = [], []
 
     state = "healthy"                                 # or "damaged"
-    proposed = False                                  # responder has acted this event
+    requested = False                                 # a propose was posted this event
+    proposed = False                                  # a proposal has been APPLIED
+    event_id = 0                                      # tags requests; guards staleness
+    request_t = None                                  # when the propose was posted
+    compute_latency = float("nan")                    # apply_t - request_t [s]
     shift_frac = 0.0                                  # 0 healthy .. 1 full event
     onset_t = None                                    # when the event engaged
-    detect_t = None                                   # when the responder acted
+    detect_t = None                                   # when the responder's gait applied
     armed = False
     heal_streak = 0
     ARM_STREAK = int(round(cfg.arm_streak_t / DT))
@@ -147,120 +174,164 @@ def run_event_bout(seed, responder, physics, incumbent, cfg):
                      and onset_t is not None) else np.nan),
             fell=int(fell), V=float(V), tilt_rms=float(tilt_rms),
             dist=float(dist), cand=cand.copy(),
-            false_alarm=False, mode=responder.mode))
+            false_alarm=False, mode=responder_mode,
+            request_t=request_t, compute_latency=compute_latency))
 
-    for k in range(n_steps):
-        t = k * DT
+    # real-time pacing: period between sim steps in wall-clock (0 -> free-run)
+    period = (DT / cfg.sim_speed) if cfg.sim_speed and cfg.sim_speed > 0 else 0.0
+    next_wall = time.perf_counter()
+    try:
+        for k in range(n_steps):
+            t = k * DT
 
-        # ── event schedule: engage only from confirmed-healthy walking ───────
-        if state == "healthy" and armed and t >= next_event_t:
-            state = "damaged"; onset_t = t; detect_t = None; proposed = False
-            y_at_onset = log["y"][k - 1] if k else 0.0
-            cand = incumbent.copy()
-            win = {"vx": [], "roll": [], "pitch": []}
-            S = 0.0
-
-        target_frac = 1.0 if state == "damaged" else 0.0
-        step_frac = DT / max(cfg.event_ramp_t, DT)
-        shift_frac = float(np.clip(shift_frac + np.sign(target_frac - shift_frac)
-                                   * step_frac, 0.0, 1.0))
-
-        frac_p = min(1.0, (k - seg_anchor) / max(1, cfg.param_ramp))
-        applied = seg_start + frac_p * (seg_target - seg_start)
-
-        st = physics.actuate(cpg, applied, roll, pitch, shift_frac)
-        base_pos, vx = st.base_pos, st.vx
-        roll, pitch, fell = st.roll, st.pitch, st.fell
-        tipmag = np.hypot(roll, pitch)
-
-        vx_s = vx if vx_s is None else vx_s + a_s * (vx - vx_s)
-        tip_s = tipmag if tip_s is None else tip_s + a_s * (tipmag - tip_s)
-        if vx_base is None:
-            if 1.5 <= t < cfg.first_event_t:
-                warm_vx.append(vx); warm_tip.append(tipmag)
-            if t >= cfg.first_event_t - DT:
-                vx_base = max(float(np.mean(warm_vx)), 0.1) if warm_vx else 0.5
-                tip_base = float(np.mean(warm_tip)) if warm_tip else 0.0
-
-        # ── arm the detector once re-stabilized after a heal ─────────────────
-        healthy_now = (vx_base is not None and state == "healthy"
-                       and t >= grace_until and vx_s >= cfg.arm_frac * vx_base
-                       and tip_s <= tip_base + np.deg2rad(5.0))
-        heal_streak = heal_streak + 1 if healthy_now else 0
-        if not armed and (heal_streak >= ARM_STREAK
-                          or (vx_base is not None and state == "healthy"
-                              and t >= last_heal_t + cfg.arm_timeout)):
-            armed = True; S = 0.0
-
-        # ── CUSUM prediction error while damaged and not yet responded ───────
-        if state == "damaged" and not proposed:
-            e = (max(0.0, vx_base - vx_s) / vx_base
-                 + max(0.0, tip_s - tip_base) / TIP_SCALE) if vx_base else 0.0
-            S = max(0.0, S + e - cfg.detect_kappa)
-
-        log["t"][k], log["y"][k] = t, base_pos[1]
-        log["vx"][k], log["roll"][k], log["pitch"][k] = vx, roll, pitch
-        log["shift"][k] = shift_frac
-        log["state"][k] = 1.0 if (state == "damaged" and proposed) else 0.0
-        log["cusum"][k] = S
-        log["cum_falls"][k] = cum_falls
-
-        # collect the post-response window (for survival scoring / stability)
-        if state == "damaged" and proposed and detect_t is not None \
-                and t - detect_t > cfg.param_ramp * DT + 0.2:
-            win["vx"].append(vx); win["roll"].append(roll); win["pitch"].append(pitch)
-
-        # ── responder acts once the event is detected ────────────────────────
-        if state == "damaged" and not proposed:
-            fired = (S > cfg.detect_h) if use_det else True
-            if (use_det and onset_t is not None
-                    and t - onset_t > cfg.detect_timeout):
-                fired = True                          # liveness: never miss a limp
-            if fired:
-                detect_t = t
-                cand = np.asarray(responder.propose()[0], float)
-                seg_start = applied.copy(); seg_target = cand.copy()
-                seg_anchor = k + 1
-                proposed = True
+            # ── event schedule: engage only from confirmed-healthy walking ───
+            if state == "healthy" and armed and t >= next_event_t:
+                state = "damaged"; onset_t = t; detect_t = None
+                requested = False; proposed = False; event_id += 1
+                request_t = None; compute_latency = float("nan")
+                y_at_onset = log["y"][k - 1] if k else 0.0
+                cand = incumbent.copy()
                 win = {"vx": [], "roll": [], "pitch": []}
+                S = 0.0
 
-        # ── fall handling ────────────────────────────────────────────────────
-        if fell and state == "damaged":               # event fall -> heal + reset
-            cum_falls += 1
+            target_frac = 1.0 if state == "damaged" else 0.0
+            step_frac = DT / max(cfg.event_ramp_t, DT)
+            shift_frac = float(np.clip(shift_frac + np.sign(target_frac - shift_frac)
+                                       * step_frac, 0.0, 1.0))
+
+            frac_p = min(1.0, (k - seg_anchor) / max(1, cfg.param_ramp))
+            applied = seg_start + frac_p * (seg_target - seg_start)
+
+            st = physics.actuate(cpg, applied, roll, pitch, shift_frac)
+            base_pos, vx = st.base_pos, st.vx
+            roll, pitch, fell = st.roll, st.pitch, st.fell
+            tipmag = np.hypot(roll, pitch)
+
+            # ── apply a gait the worker has delivered (non-blocking) ─────────
+            # Drain the result queue: apply a proposal matching the CURRENT event,
+            # discard stale ones left over from an event that already ended.
+            while True:
+                got = worker.poll()
+                if got is None:
+                    break
+                rid, cand_new, _mode = got
+                if rid == event_id and requested and not proposed:
+                    cand = np.asarray(cand_new, float)
+                    seg_start = applied.copy(); seg_target = cand.copy()
+                    seg_anchor = k + 1
+                    proposed = True
+                    detect_t = t                      # the gait becomes active now
+                    compute_latency = (t - request_t if request_t is not None
+                                       else np.nan)
+                    win = {"vx": [], "roll": [], "pitch": []}
+
+            vx_s = vx if vx_s is None else vx_s + a_s * (vx - vx_s)
+            tip_s = tipmag if tip_s is None else tip_s + a_s * (tipmag - tip_s)
+            if vx_base is None:
+                if 1.5 <= t < cfg.first_event_t:
+                    warm_vx.append(vx); warm_tip.append(tipmag)
+                if t >= cfg.first_event_t - DT:
+                    vx_base = max(float(np.mean(warm_vx)), 0.1) if warm_vx else 0.5
+                    tip_base = float(np.mean(warm_tip)) if warm_tip else 0.0
+
+            # ── arm the detector once re-stabilized after a heal ─────────────
+            healthy_now = (vx_base is not None and state == "healthy"
+                           and t >= grace_until and vx_s >= cfg.arm_frac * vx_base
+                           and tip_s <= tip_base + np.deg2rad(5.0))
+            heal_streak = heal_streak + 1 if healthy_now else 0
+            if not armed and (heal_streak >= ARM_STREAK
+                              or (vx_base is not None and state == "healthy"
+                                  and t >= last_heal_t + cfg.arm_timeout)):
+                armed = True; S = 0.0
+
+            # ── CUSUM prediction error while damaged and not yet requested ───
+            if state == "damaged" and not requested:
+                e = (max(0.0, vx_base - vx_s) / vx_base
+                     + max(0.0, tip_s - tip_base) / TIP_SCALE) if vx_base else 0.0
+                S = max(0.0, S + e - cfg.detect_kappa)
+
+            log["t"][k], log["y"][k] = t, base_pos[1]
+            log["vx"][k], log["roll"][k], log["pitch"][k] = vx, roll, pitch
+            log["shift"][k] = shift_frac
+            log["state"][k] = 1.0 if (state == "damaged" and proposed) else 0.0
+            log["cusum"][k] = S
             log["cum_falls"][k] = cum_falls
-            responder.update(cand, cfg.v_fall, True)
-            _record_event(True, cfg.v_fall, base_pos,
+
+            # collect the post-response window (for survival scoring / stability)
+            if state == "damaged" and proposed and detect_t is not None \
+                    and t - detect_t > cfg.param_ramp * DT + 0.2:
+                win["vx"].append(vx); win["roll"].append(roll)
+                win["pitch"].append(pitch)
+
+            # ── request a gait once the event is detected (non-blocking) ─────
+            # The sim keeps walking on the current gait; the worker's reply is
+            # applied by the drain block above whenever it arrives, so a slow
+            # optimizer costs real sim-time (compute_latency), not a frozen loop.
+            if state == "damaged" and not requested:
+                fired = (S > cfg.detect_h) if use_det else True
+                if (use_det and onset_t is not None
+                        and t - onset_t > cfg.detect_timeout):
+                    fired = True                      # liveness: never miss a limp
+                if fired:
+                    request_t = t
+                    worker.request_propose(event_id)
+                    requested = True
+
+            # ── fall handling ────────────────────────────────────────────────
+            # `cand` is the gait ACTUALLY active at the fall: the applied proposal,
+            # or the incumbent if the robot fell before the worker's reply landed
+            # (the realistic penalty a slow method pays). Bumping event_id discards
+            # any still-in-flight proposal for this now-ended event.
+            if fell and state == "damaged":           # event fall -> heal + reset
+                cum_falls += 1
+                log["cum_falls"][k] = cum_falls
+                worker.push_update(cand, cfg.v_fall, True)
+                _record_event(True, cfg.v_fall, base_pos,
+                              _tilt_rms_deg(win["roll"][-tail_n:], win["pitch"][-tail_n:]),
+                              base_pos[1] - y_at_onset)
+                cpg = physics.reset([base_pos[0], base_pos[1]],
+                                    seed * 131 + len(events))
+                roll = pitch = 0.0
+                seg_start = incumbent.copy(); seg_target = incumbent.copy()
+                seg_anchor = k + 1
+                state = "healthy"; armed = False; heal_streak = 0; S = 0.0
+                next_event_t = t + rng.uniform(cfg.gap_min, cfg.gap_max)
+                grace_until = t + cfg.grace
+                last_heal_t = t
+                onset_t = None; detect_t = None
+                requested = False; proposed = False; event_id += 1
+                request_t = None; compute_latency = float("nan")
+            elif fell:                                # residual healthy fall
+                cpg = physics.reset([base_pos[0], base_pos[1]],
+                                    seed * 131 + 90000 + k)
+                roll = pitch = 0.0
+                seg_start = incumbent.copy(); seg_target = incumbent.copy()
+                seg_anchor = k + 1
+                armed = False; heal_streak = 0; S = 0.0
+                grace_until = t + cfg.grace
+                last_heal_t = t
+                requested = False; proposed = False; event_id += 1
+                n_reset += 1
+
+            # ── real-time pace so wall-clock optimize time maps to sim steps ─
+            if period > 0.0:
+                next_wall += period
+                sleep_for = next_wall - time.perf_counter()
+                if sleep_for > 0.0:
+                    time.sleep(sleep_for)
+                elif sleep_for < -period:             # far behind: resync, no burst
+                    next_wall = time.perf_counter()
+
+        # ── bout end: score a surviving gait (event that never fell) ─────────
+        if state == "damaged" and proposed and len(win["vx"]) >= 20:
+            V = score_V(win["vx"][-tail_n:], win["roll"][-tail_n:],
+                        win["pitch"][-tail_n:], cfg.target_vx, cfg.v_fall)
+            worker.push_update(cand, V, False)
+            _record_event(False, V, [log["y"][-1]] * 3,
                           _tilt_rms_deg(win["roll"][-tail_n:], win["pitch"][-tail_n:]),
-                          base_pos[1] - y_at_onset)
-            cpg = physics.reset([base_pos[0], base_pos[1]],
-                                seed * 131 + len(events))
-            roll = pitch = 0.0
-            seg_start = incumbent.copy(); seg_target = incumbent.copy()
-            seg_anchor = k + 1
-            state = "healthy"; armed = False; heal_streak = 0; S = 0.0
-            next_event_t = t + rng.uniform(cfg.gap_min, cfg.gap_max)
-            grace_until = t + cfg.grace
-            last_heal_t = t
-            onset_t = None; detect_t = None; proposed = False
-        elif fell:                                    # residual healthy fall
-            cpg = physics.reset([base_pos[0], base_pos[1]],
-                                seed * 131 + 90000 + k)
-            roll = pitch = 0.0
-            seg_start = incumbent.copy(); seg_target = incumbent.copy()
-            seg_anchor = k + 1
-            armed = False; heal_streak = 0; S = 0.0
-            grace_until = t + cfg.grace
-            last_heal_t = t
-            n_reset += 1
+                          log["y"][-1] - y_at_onset)
+    finally:
+        worker.close()
+        physics.disconnect()
 
-    # ── bout end: score a surviving gait (event that never fell) ─────────────
-    if state == "damaged" and proposed and len(win["vx"]) >= 20:
-        V = score_V(win["vx"][-tail_n:], win["roll"][-tail_n:], win["pitch"][-tail_n:],
-                    cfg.target_vx, cfg.v_fall)
-        responder.update(cand, V, False)
-        _record_event(False, V, [log["y"][-1]] * 3,
-                      _tilt_rms_deg(win["roll"][-tail_n:], win["pitch"][-tail_n:]),
-                      log["y"][-1] - y_at_onset)
-
-    physics.disconnect()
     return log, events, n_false, n_reset
