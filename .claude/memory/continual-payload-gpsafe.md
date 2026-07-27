@@ -1,6 +1,6 @@
 ---
 name: continual-payload-gpsafe
-description: "experiment-payload-adapt/run_continual.py — continual repeated-payload-shift recovery with GPSafeRecovery (moved to methods/), CUSUM trigger, restore-after-fall; the working adaptation story"
+description: "experiment-simulation/experiment-payload-adapt/run_continual.py — continual repeated-payload-shift recovery with GPSafeRecovery (moved to methods/), CUSUM trigger, restore-after-fall; the working adaptation story"
 metadata: 
   node_type: memory
   type: project
@@ -8,12 +8,12 @@ metadata:
 ---
 
 Created 2026-07-15 (user request): continual analogue of
-experiment-damage-adapt/run_continual.py for the payload shift. Moved
-`gp_safe_agent.py` from experiment-damage-adapt/ to **methods/** (shared); fixed
+experiment-simulation/experiment-damage-adapt/run_continual.py for the payload shift. Moved
+`gp_safe_agent.py` from experiment-simulation/experiment-damage-adapt/ to **methods/** (shared); fixed
 the two damage consumers (run_gpsafe.py, run_continual.py) to
 `from methods import gp_safe_agent as gp`. gp_safe_agent was NOT git-tracked.
 
-experiment-payload-adapt/run_continual.py: one 120 s bout, 8 kg payload shifts
+experiment-simulation/experiment-payload-adapt/run_continual.py: one 120 s bout, 8 kg payload shifts
 off-sagittal (default lat 0.215/back 0.20) recurring every 2-8 s of healthy
 walking; GPSafeRecovery (EFE objective, free_dims [0,1,3,4,7] =
 coupling/w_swing/F_FAST/STOP/b) proposes a gait from persistent GP memory at

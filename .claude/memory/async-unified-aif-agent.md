@@ -32,7 +32,7 @@ CUSUM. Key distinction from `MARXAgent`: here the MARX belief only drives the
 *trigger* — its CasADi EFE solver is never invoked (only `update` /
 `posterior_predictive` / `crossentropy`); the GP selects the gait.
 
-**Damage experiment** (`experiment-damage-adapt/`). RR hip+knee maxForce ramps
+**Damage experiment** (`experiment-simulation/experiment-damage-adapt/`). RR hip+knee maxForce ramps
 60→20 Nm, persistent, never auto-healed — only a fall reverts it (stand up, heal,
 re-engage after a random 2-8 s gap). The load-bearing design choice: control is
 *per-leg* hip amplitude (`PerLegCPG`, 11-D vector, `FREE_DIMS_DAMAGE` = the 4 per-leg

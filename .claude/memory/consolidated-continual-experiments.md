@@ -7,8 +7,8 @@ metadata:
   originSessionId: 442f0b08-3945-4276-8849-c8856d320d5e
 ---
 
-2026-07-16: consolidated the `run_*` trio in **experiment-payload-adapt** and
-**experiment-damage-adapt** into a single `run_experiment.py` + `analyze.py` per
+2026-07-16: consolidated the `run_*` trio in **experiment-simulation/experiment-payload-adapt** and
+**experiment-simulation/experiment-damage-adapt** into a single `run_experiment.py` + `analyze.py` per
 folder, over 5 arms: `noadapt, grid, bo, safegp, oracle` (safegp REPLACED marxefe
 as the hero method). Protocol = continual recurring events (payload shift / leg
 damage), CUSUM detector, random 2-8 s gaps, ~120 s bout, fall -> reset-at-position

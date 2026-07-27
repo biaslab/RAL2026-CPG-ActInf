@@ -10,8 +10,8 @@ This supersedes the old global-8-D BO oracle fit: single-leg damage is only
 recoverable with per-leg control (the asymmetry is irreducible for a global gait).
 
 Usage (from repo root):
-    python experiment-damage-adapt/fit_damage_oracles.py            # 20 Nm, RR
-    python experiment-damage-adapt/fit_damage_oracles.py --force 20 --n 60 --seeds 4
+    python experiment-simulation/experiment-damage-adapt/fit_damage_oracles.py            # 20 Nm, RR
+    python experiment-simulation/experiment-damage-adapt/fit_damage_oracles.py --force 20 --n 60 --seeds 4
 """
 
 import argparse
@@ -23,7 +23,8 @@ import sys
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.dirname(_HERE)
+# experiment-simulation/experiment-damage-adapt/ -> repo root (two levels up)
+_REPO = os.path.dirname(os.path.dirname(_HERE))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 

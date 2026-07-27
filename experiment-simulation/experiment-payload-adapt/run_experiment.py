@@ -1,4 +1,4 @@
-"""Continual payload-shift adaptation -- all five arms in one experiment.
+"""Continual payload-shift adaptation -- all arms in one experiment.
 
 The single, consolidated payload experiment (supersedes the old run_experiment /
 run_continual / run_gpsafe trio). One long, non-episodic bout on flat ground:
@@ -16,14 +16,19 @@ run_continual / run_gpsafe trio). One long, non-episodic bout on flat ground:
 Headline metric = FALLS PER BOUT: no-adapt tips over repeatedly; a good adapter
 falls rarely.
 
-Five arms (event_responders.ALL_ARMS), all searching the same reduced CPG
-dims (FREE_DIMS_PAYLOAD) so the comparison is head-to-head:
+The arms (event_responders.ALL_ARMS, plus `aif` on request), all searching the
+same reduced CPG dims (FREE_DIMS_PAYLOAD) so the comparison is head-to-head:
 
   noadapt -> hold the flat-optimal gait (lower anchor);
   grid    -> Latin-hypercube proposals (naive search);
   bo      -> GP-UCB on the per-event stability score;
+  esc     -> extremum-seeking control: sinusoidal-dither, demodulated gradient
+             over the reduced dims (model-free classical online tuner);
   safegp  -> the safe GP recovery agent (methods.gp_safe_agent);
-  oracle  -> jump to the pre-fit post-shift optimum (upper anchor).
+  oracle  -> jump to the pre-fit post-shift optimum (upper anchor);
+  aif     -> the unified active-inference agent (methods.aif_recovery): a MARX
+             model drives its OWN in-process CUSUM trigger while a GP picks the
+             gait; not in ALL_ARMS, request it by name.
 
 Per event (each ends at a fall, or at the bout end for a surviving gait) we
 record fall / stability (RMS body tilt) / distance; results are written for the
@@ -33,8 +38,8 @@ analysis notebook (analyze.ipynb) to load:
   results/logs/<method>_seed<k>.npz   per-seed step traces (incl. cumulative falls)
 
 Usage (from repo root):
-    python experiment-payload-adapt/run_experiment.py --seeds 5 --duration 120
-    python experiment-payload-adapt/run_experiment.py --arms noadapt safegp oracle
+    python experiment-simulation/experiment-payload-adapt/run_experiment.py --seeds 5 --duration 120
+    python experiment-simulation/experiment-payload-adapt/run_experiment.py --arms noadapt safegp oracle
     # oracle arm needs results/payload_optima.json (python fit_payload_oracles.py)
 """
 
@@ -49,7 +54,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.dirname(_HERE)
+# experiment-simulation/experiment-payload-adapt/ -> repo root (two levels up)
+_REPO = os.path.dirname(os.path.dirname(_HERE))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
@@ -283,8 +289,9 @@ def main():
                          "(memory feedback); NOT an auto-revert timer -- the shift "
                          "persists until a fall regardless")
     ap.add_argument("--mass", type=float, default=PAYLOAD_MASS, help="payload mass [kg]")
-    ap.add_argument("--lat", type=float, default=SHIFT_LAT, help="lateral shift [m]")
-    ap.add_argument("--back", type=float, default=SHIFT_BACK,
+    ap.add_argument("--shift-lat", type=float, default=SHIFT_LAT,
+                    help="lateral shift [m]")
+    ap.add_argument("--shift-back", type=float, default=SHIFT_BACK,
                     help="rearward shift [m] (negative = forward)")
     ap.add_argument("--shift-ramp-t", type=float, default=SHIFT_RAMP_T,
                     help="shift ramp duration [s] (shift speed): small = fast/"
@@ -356,11 +363,11 @@ def main():
     oracle_target = load_oracle_target()
     if "oracle" in a.arms and oracle_target is None:
         raise SystemExit("oracle arm needs results/payload_optima.json "
-                         "(run: python experiment-payload-adapt/fit_payload_oracles.py)")
+                         "(run: python experiment-simulation/experiment-payload-adapt/fit_payload_oracles.py)")
     from methods.cpg_bounds import bounds_lower, bounds_upper
     box = (bounds_lower.numpy(), bounds_upper.numpy())
     free = a.free_dims if a.free_dims is not None else FREE_DIMS_PAYLOAD
-    physics_kw = dict(mass=a.mass, lat=a.lat, back=a.back)
+    physics_kw = dict(mass=a.mass, lat=a.shift_lat, back=a.shift_back)
     cfg = cd.BoutConfig(dt=DT, duration=a.duration, gap_min=a.gap_min,
                         gap_max=a.gap_max, event_ramp_t=a.shift_ramp_t,
                         eval_hold=a.eval_hold,
@@ -369,7 +376,8 @@ def main():
                         grace=a.grace, sim_speed=a.sim_speed)
 
     print(f"continual payload-shift adaptation: arms={a.arms} x {a.seeds} seeds "
-          f"x {a.duration:g}s; {a.mass:g}kg shift ({a.lat:g} lat, {a.back:g} back), "
+          f"x {a.duration:g}s; {a.mass:g}kg shift ({a.shift_lat:g} lat, "
+          f"{a.shift_back:g} back), "
           f"persists until a fall; re-engages {a.gap_min:g}-{a.gap_max:g}s after each")
     print(f"  incumbent: {np.round(incumbent, 3).tolist()}")
     print(f"  searching dims {free} ({[PARAM_NAMES[i] for i in free]})")

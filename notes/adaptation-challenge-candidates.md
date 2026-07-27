@@ -34,7 +34,7 @@ showed adaptation has traction. Easy paper story (load carriage), and
 reversible mid-episode (pick up / drop off cargo) so the trigger gets both an
 onset and an offset.
 
-→ implemented in `experiment-payload-adapt/` (payload shifts at T/2).
+→ implemented in `experiment-simulation/experiment-payload-adapt/` (payload shifts at T/2).
 
 ### 2. Viscous resistance — wading through water or mud
 

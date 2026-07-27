@@ -33,13 +33,18 @@ import os
 
 import numpy as np
 
-METHOD_ORDER = ["noadapt", "grid", "bo", "safegp", "oracle"]
+METHOD_ORDER = ["noadapt", "grid", "bo", "esc", "safegp", "aif", "oracle"]
 LABELS = {"noadapt": "No adaptation", "grid": "Grid search",
-          "bo": "Bayesian opt.", "safegp": "Safe GP (ours)", "oracle": "Oracle"}
+          "bo": "Bayesian opt.", "esc": "Extremum seeking",
+          "safegp": "Safe GP (ablation)", "aif": "Active inference (ours)",
+          "oracle": "Oracle"}
 PALETTE = {"noadapt": "#999999", "grid": "#E69F00", "bo": "#56B4E9",
-           "safegp": "#D55E00", "oracle": "#009E73"}
-MARKERS = {"noadapt": "o", "grid": "s", "bo": "^", "safegp": "D", "oracle": "*"}
-LINESTYLES = {"noadapt": ":", "grid": "-", "bo": "-", "safegp": "-", "oracle": "--"}
+           "esc": "#CC79A7", "safegp": "#D55E00", "aif": "#0072B2",
+           "oracle": "#009E73"}
+MARKERS = {"noadapt": "o", "grid": "s", "bo": "^", "esc": "v",
+           "safegp": "D", "aif": "P", "oracle": "*"}
+LINESTYLES = {"noadapt": ":", "grid": "-", "bo": "-", "esc": "-",
+              "safegp": "--", "aif": "-", "oracle": "--"}
 
 
 # ── load ─────────────────────────────────────────────────────────────────────
@@ -306,6 +311,63 @@ def _style():
     return plt
 
 
+def fig_trigger(results_dir, seed=4, method="aif", pre=2.0, post=25.0,
+                cusum_h=5.0, out_path=None):
+    """The detect-adapt-quiet cycle over ONE event, from that seed's step trace:
+    forward speed, the attitude cross-entropy the trigger reads, and the CUSUM it
+    accumulates. Shaded orange from event onset to the trigger firing, green once
+    the proposed gait is active. Returns the Figure, or None if the log is absent.
+
+    Three panels rather than two because the two lower signals say different
+    things, and only the second is the quieting: after adaptation the
+    cross-entropy settles ABOVE its healthy baseline (a shifted load is never
+    quite free), but the residual excess sits below the CUSUM's slack, so the
+    accumulator stays pinned at zero and never reaches `cusum_h` again. The
+    cross-entropy panel is clipped to the baseline's scale: it spikes by orders of
+    magnitude during the ramp-in, when the belief is briefly wrong about a body
+    changing under it, and that transient is not the quantity of interest."""
+    import os
+    plt = _style()
+    path = os.path.join(results_dir, "logs", f"{method}_seed{seed}.npz")
+    if not os.path.exists(path):
+        return None
+    d = np.load(path)
+    t, vx, ce, S, st = d["t"], d["vx"], d["cxent"], d["cusum"], d["state"]
+    onset_i = np.flatnonzero((d["shift"][1:] > 0) & (d["shift"][:-1] == 0))
+    apply_i = np.flatnonzero((st[1:] == 1) & (st[:-1] == 0))
+    if not len(onset_i) or not len(apply_i):
+        return None
+    t0, t1 = t[onset_i[0]], t[apply_i[0]]
+    m = (t >= t0 - pre) & (t <= t1 + post)
+    pre_m = (t >= t0 - pre) & (t < t0)
+    base, spread = float(np.median(ce[pre_m])), float(np.std(ce[pre_m]))
+
+    fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(7.0, 5.4), sharex=True)
+    for ax in (ax0, ax1, ax2):
+        ax.axvspan(t0, t1, color="#E69F00", alpha=0.18, lw=0)
+        ax.axvspan(t1, t[m][-1], color="#009E73", alpha=0.12, lw=0)
+    ax0.plot(t[m], vx[m], color="#D55E00", lw=1.0)
+    ax0.set_ylabel("forward speed\n$v_x$ [m/s]")
+    ax0.annotate(f"trigger fires ({t1 - t0:.2f} s)", xy=(t1, 0.97),
+                 xycoords=("data", "axes fraction"), xytext=(4, -2),
+                 textcoords="offset points", fontsize=8.5, va="top")
+    ax1.plot(t[m], ce[m], color="#56B4E9", lw=1.2)
+    ax1.axhline(base, color="#999999", ls=":", lw=1.2, label="healthy baseline")
+    ax1.set_ylim(base - 2.0 * spread, base + 8.0 * max(1e-6, spread))
+    ax1.set_ylabel("cross-entropy\n" r"$\epsilon_k$")
+    ax1.legend(fontsize=8.5, loc="upper right")
+    ax2.plot(t[m], S[m], color="#0072B2", lw=1.2)
+    ax2.axhline(cusum_h, color="#999999", ls="--", lw=1.2, label=f"threshold $h$")
+    ax2.set_ylim(-0.2, 1.25 * cusum_h)
+    ax2.set_ylabel("CUSUM\n" r"$S_k$")
+    ax2.set_xlabel("time [s]")
+    ax2.legend(fontsize=8.5, loc="upper right")
+    fig.tight_layout()
+    if out_path:
+        fig.savefig(out_path, bbox_inches="tight")
+    return fig
+
+
 def fig_comparison(rows, title, event_word, out_path=None):
     """3-panel headline: fall rate / surviving RMS tilt / trial distance per
     method, mean +/- SEM across seeds, with direct value labels. Saves to
@@ -381,7 +443,8 @@ def fig_falls_over_time(results_dir, title, event_word, out_path=None):
                 label=LABELS[m])
     ax.set_xlabel("time [s]")
     ax.set_ylabel("cumulative falls (mean over seeds)")
-    ax.set_title(f"{title}: falls accumulating over the bout")
+    if title:                  # empty title => bare axes, for a paper figure
+        ax.set_title(f"{title}: falls accumulating over the bout")
     ax.legend(ncol=2, fontsize=8.5, loc="upper left")
     ax.margins(x=0.01)
     fig.tight_layout()

@@ -1,13 +1,13 @@
 ---
 name: payload-shift-experiment
-description: experiment-payload-adapt — 8 kg payload shifting 0.20 m lat+back at T/2; screened regime map; persistent-mismatch challenge replacing terrain transitions
+description: experiment-simulation/experiment-payload-adapt — 8 kg payload shifting 0.20 m lat+back at T/2; screened regime map; persistent-mismatch challenge replacing terrain transitions
 metadata: 
   node_type: memory
   type: project
   originSessionId: aece00c0-2916-4a97-8f01-c7a9ab6d2bbd
 ---
 
-Created 2026-07-14: `experiment-payload-adapt/` — flat ground, 8 kg box
+Created 2026-07-14: `experiment-simulation/experiment-payload-adapt/` — flat ground, 8 kg box
 constraint-fixed 0.15 m above the trunk, shifts 0.20 m lateral + 0.20 m rearward
 at T/2 (ramped 1 s). Rationale: terrain transitions failed because falls were
 transition shocks ([[oracle-cannot-beat-noadapt]]); a CoM offset is a

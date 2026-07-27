@@ -132,5 +132,5 @@ $\lambda^2$ correctly reports as "don't bother," whereas the CE ratio screams.
 **Next step (proposed).** Prototype an alternative `TriggerMonitor` that computes
 $g, H, \lambda^2$ each step by autodiffing the EFE objective at the incumbent,
 logs it alongside the current CE ratio, and compares when each fires on the
-existing `experiment-flat2slope-adapt` runs — to check empirically whether the
+existing `archive/experiments/experiment-flat2slope-adapt` runs — to check empirically whether the
 χ² threshold and the controllable-projection story hold up on the 10° vs 15° data.

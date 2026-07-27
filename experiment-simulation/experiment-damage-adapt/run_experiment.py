@@ -1,4 +1,4 @@
-"""Continual leg-damage adaptation -- all five arms in one experiment.
+"""Continual leg-damage adaptation -- all arms in one experiment.
 
 The single, consolidated leg-damage experiment (supersedes the old
 run_experiment / run_continual / run_gpsafe trio). One long, non-episodic bout on
@@ -27,14 +27,19 @@ which cannot express that compensation and so fails. With a single GLOBAL hip
 amplitude there is no regime where no-adapt fails AND a recovery is findable
 (the asymmetry is irreducible); per-leg control opens a broad, findable recovery.
 
-Five arms (event_responders.ALL_ARMS), all searching the 4 per-leg hip amplitudes
-(FREE_DIMS_DAMAGE) so the comparison is head-to-head:
+The arms (event_responders.ALL_ARMS, plus `aif` on request), all searching the
+4 per-leg hip amplitudes (FREE_DIMS_DAMAGE) so the comparison is head-to-head:
 
   noadapt -> hold the symmetric flat-optimal gait (lower anchor; falls under damage);
   grid    -> Latin-hypercube proposals (naive search);
   bo      -> GP-UCB on the per-event stability score;
+  esc     -> extremum-seeking control: sinusoidal-dither, demodulated gradient
+             over the reduced dims (model-free classical online tuner);
   safegp  -> the safe GP recovery agent (methods.gp_safe_agent);
-  oracle  -> jump to the pre-fit per-leg recovery gait (upper anchor).
+  oracle  -> jump to the pre-fit per-leg recovery gait (upper anchor);
+  aif     -> the unified active-inference agent (methods.aif_recovery): a MARX
+             model drives its OWN in-process CUSUM trigger while a GP picks the
+             gait; not in ALL_ARMS, request it by name.
 
 Per event (each ends at a fall, or at the bout end for a surviving gait) we
 record fall / stability (RMS body tilt) / distance; results are written for the
@@ -44,8 +49,8 @@ analysis notebook (analyze.ipynb) to load:
   results/logs/<method>_seed<k>.npz   per-seed step traces (incl. cumulative falls)
 
 Usage (from repo root):
-    python experiment-damage-adapt/run_experiment.py --seeds 5 --duration 120
-    python experiment-damage-adapt/run_experiment.py --arms noadapt safegp oracle
+    python experiment-simulation/experiment-damage-adapt/run_experiment.py --seeds 5 --duration 120
+    python experiment-simulation/experiment-damage-adapt/run_experiment.py --arms noadapt safegp oracle
     # oracle arm reads the per-leg recovery gait from results/damage_optima.json
     # (refit over the 4 per-leg hip amplitudes at the damage force)
 """
@@ -61,7 +66,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.dirname(_HERE)
+# experiment-simulation/experiment-damage-adapt/ -> repo root (two levels up)
+_REPO = os.path.dirname(os.path.dirname(_HERE))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
@@ -338,7 +344,7 @@ def main():
     oracle_target = load_oracle_target()
     if "oracle" in a.arms and oracle_target is None:
         raise SystemExit("oracle arm needs results/damage_optima.json "
-                         "(run: python experiment-damage-adapt/fit_damage_oracles.py)")
+                         "(run: python experiment-simulation/experiment-damage-adapt/fit_damage_oracles.py)")
     from methods.cpg_bounds import bounds_lower, bounds_upper
     from methods.marxefe_optimizer import PerLegCPG
     box = PerLegCPG.expand_box(bounds_lower.numpy(), bounds_upper.numpy())

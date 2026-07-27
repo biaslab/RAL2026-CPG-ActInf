@@ -41,6 +41,10 @@ def run_event_bout_aif(seed, agent, physics, incumbent, cfg):
     incumbent = np.asarray(incumbent, float)
     rng = np.random.default_rng(777 + int(seed))
     tail_n = max(1, int(round(cfg.eval_hold / DT)))
+    # settle window after each applied gait before the trigger may re-fire within
+    # the same event (the ramp-in plus one eval-hold): long enough to observe the
+    # new gait, so re-adaptation reacts to persistent error, not the ramp transient.
+    readapt_hold = cfg.param_ramp * DT + cfg.eval_hold
 
     cpg = physics.setup(seed)
     n_steps = int(round(cfg.duration / DT))
@@ -60,6 +64,8 @@ def run_event_bout_aif(seed, agent, physics, incumbent, cfg):
     onset_t = detect_t = None
     next_event_t = cfg.first_event_t
     grace_until = 1.5
+    last_apply_t = None                   # when the current gait went active
+    have_gait = False                     # an adapted gait is active this event
     cand = incumbent.copy()
     seg_start = incumbent.copy(); seg_target = incumbent.copy(); seg_anchor = 0
     applied = incumbent.copy()
@@ -115,6 +121,7 @@ def run_event_bout_aif(seed, agent, physics, incumbent, cfg):
             if state == "healthy" and getattr(agent, "armed", True) and engage_ready:
                 state = "damaged"; onset_t = t; detect_t = None
                 requested = False; proposed = False; event_id += 1
+                last_apply_t = None; have_gait = False
                 request_t = None; compute_latency = float("nan")
                 y_at_onset = log["y"][k - 1] if k else 0.0
                 cand = incumbent.copy()
@@ -149,15 +156,27 @@ def run_event_bout_aif(seed, agent, physics, incumbent, cfg):
                     cand = c
                     seg_start = applied.copy(); seg_target = cand.copy()
                     seg_anchor = k + 1
-                    proposed = True
-                    detect_t = t                  # the gait becomes active now
+                    proposed = True; have_gait = True
+                    last_apply_t = t; agent.S = 0.0   # start the settle window; the
+                                                      # CUSUM re-accumulates from zero
+                    if detect_t is None:
+                        detect_t = t                  # first activation = event detect
                     compute_latency = t - request_t if request_t is not None else np.nan
                     win = {"vx": [], "vy": [], "roll": [], "pitch": []}
+
+            # settle window: after a gait is applied, hold the CUSUM at zero until
+            # readapt_hold elapses, so only error that PERSISTS past the new gait's
+            # ramp-in can re-accumulate and re-fire -- this is what lets adaptation
+            # recur within an event without chattering on the transient.
+            in_refractory = (have_gait and last_apply_t is not None
+                             and t - last_apply_t <= readapt_hold)
+            if in_refractory:
+                agent.S = 0.0
 
             log["t"][k], log["y"][k] = t, base_pos[1]
             log["vx"][k], log["roll"][k], log["pitch"][k] = vx, roll, pitch
             log["shift"][k] = shift_frac
-            log["state"][k] = 1.0 if (state == "damaged" and proposed) else 0.0
+            log["state"][k] = 1.0 if (state == "damaged" and have_gait) else 0.0
             log["cusum"][k] = agent.S
             log["cxent"][k] = agent.H
             log["surprise"][k] = agent.surprise
@@ -174,15 +193,22 @@ def run_event_bout_aif(seed, agent, physics, incumbent, cfg):
                 win["roll"].append(roll); win["pitch"].append(pitch)
 
             # ── agent-owned trigger fires -> dispatch propose OFF-THREAD ──────
-            if state == "damaged" and not requested:
+            # The trigger stays live for the whole event: it fires for the first
+            # adaptation and AGAIN whenever error re-accumulates past threshold once
+            # the settle window has passed, so re-adaptation recurs within an event
+            # regardless of falls. Only an in-flight proposal blocks a new fire.
+            if state == "damaged" and not requested and not in_refractory:
                 fired = agent.should_fire()
-                if onset_t is not None and t - onset_t > cfg.detect_timeout:
-                    fired = True                  # liveness: never miss a limp
+                if onset_t is not None and detect_t is None \
+                        and t - onset_t > cfg.detect_timeout:
+                    fired = True                  # liveness: never miss the first limp
                 if fired:
+                    if have_gait:                 # re-adaptation: record the outgoing
+                        agent.update(cand, _y_obs(), False)   # gait's outcome first
                     request_t = t
                     req_event = event_id
                     pending = pool.submit(agent.propose)
-                    requested = True
+                    requested = True; proposed = False
 
             # ── fall handling ────────────────────────────────────────────────
             if fell and state == "damaged":
@@ -203,6 +229,7 @@ def run_event_bout_aif(seed, agent, physics, incumbent, cfg):
                 grace_until = t + cfg.grace
                 onset_t = None; detect_t = None
                 requested = False; proposed = False; event_id += 1
+                last_apply_t = None; have_gait = False
                 request_t = None; compute_latency = float("nan")
                 agent.on_reset()
             elif fell:
@@ -214,6 +241,7 @@ def run_event_bout_aif(seed, agent, physics, incumbent, cfg):
                 seg_anchor = k + 1
                 grace_until = t + cfg.grace
                 requested = False; proposed = False; event_id += 1
+                last_apply_t = None; have_gait = False
                 n_reset += 1
                 agent.on_reset()
 
@@ -226,7 +254,7 @@ def run_event_bout_aif(seed, agent, physics, incumbent, cfg):
                 elif sleep_for < -period:
                     next_wall = time.perf_counter()
 
-        if state == "damaged" and proposed and len(win["vx"]) >= 20:
+        if state == "damaged" and have_gait and len(win["vx"]) >= 20:
             V = score_V(win["vx"][-tail_n:], win["roll"][-tail_n:],
                         win["pitch"][-tail_n:], cfg.target_vx, cfg.v_fall)
             agent.update(cand, _y_obs(), False)

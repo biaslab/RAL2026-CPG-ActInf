@@ -51,21 +51,36 @@ buys nothing over naive search, the intended contrast. safegp vs aif is a tie (p
 Two framing points: ESC's `propose` is arithmetic-only (max compute latency 0.01 s vs
 1.4-1.8 s for the GP arms), so it *wins* on latency and still loses on falls; and the
 AIF trigger detects faster than the CUSUM arms (median 0.88 s vs ~1.27 s).
-Within-event re-adaptation fires but stays selective: 203 gait applies over 141 events,
-62 within-event re-adapts, concentrated in 20/100 seeds (proxy count — see below).
+**Within-event re-adaptation never actually fires — the guard is buggy.** In
+`continual_driver_aif.py` the trigger gate reads `if state == "damaged" and not requested
+and not in_refractory`, but `requested` is set True on the first fire of an event and is
+only cleared at event end or on a fall, so the trigger latches for the whole event. The
+comment above it ("Only an in-flight proposal blocks a new fire") describes the intent;
+the gate should be `(not requested or proposed)`, since `proposed` already flips True when
+the proposal lands and is reset to False on each new request. Exact measurement (wrap
+`PayloadPhysics.actuate` and count fresh ramp starts): gait applies == events + falls in
+all 10 seeds tested, i.e. exactly ONE adaptation per event, the extra ramp per fall being
+the restore-to-incumbent. The CUSUM does re-cross threshold h=5 later in most bouts
+(median ~17 crossings/bout); nothing acts on them. The 2026-07-26 100-seed results and the
+paper text therefore describe one-adaptation-per-event; fixing the gate invalidates them.
 
-Proxy for counting gait applies: the npz logs carry no per-step param trace, but the
-settle window forces `cusum` to exactly 0 for `readapt_hold` = 10.3 s after every apply,
-so maximal zero-runs >= 1000 steps while `state`==1 count applies. It UNDER-counts when a
-fall truncates the window. Do not count zero-crossings instead — a CUSUM hits its 0 floor
-constantly and that gave a ~100x overcount on the first attempt.
+Two proxies for counting applies from the npz logs both failed, hence the actuate wrapper:
+counting CUSUM zero-crossings overcounts ~50x (a CUSUM sits at its 0 floor constantly), and
+counting the forced-zero settle windows (`readapt_hold` = 10.3 s) undercounts whenever a
+fall truncates the window.
 
-**Comparability trap:** the 100-seed CSVs in `results/` and `results/aif-100-uprighttrig/`
-are from 2026-07-19, i.e. BEFORE the async-responder refactor committed in 0af436c
-(2026-07-25) touched `continual_driver.py`. noadapt alone moved 14.26 -> 5.4 falls/bout
-(and 15 -> 6.4 events/bout, 96% -> 84% per-event fall rate) with no change to that arm's
-own code, so the old and new numbers must NOT be pooled or compared. Those runs also
-used **300 s** bouts, not the 120 s CLI default — always pass `--duration 300`.
+**Comparability trap:** results generated before the async-responder refactor (0af436c,
+2026-07-25, which touched `continual_driver.py`) must NOT be pooled with later ones —
+noadapt alone moved 14.26 -> 5.18 falls/bout with no change to that arm's own code.
+All such results were archived on 2026-07-26 to
+`experiment-{payload,damage}-adapt/results/archive-pre-async-20260725/`, and the
+100-seed run promoted to the top level of the payload `results/` (which is what
+`analyze.ipynb` reads); see the `PROVENANCE.md` now in each results dir. Consequence:
+**experiment-simulation/experiment-damage-adapt has no valid results at all** and needs a full re-run.
+Runs use **300 s** bouts, not the 120 s CLI default — always pass `--duration 300`.
+`incumbent.json` / `payload_optima.json` / `damage_optima.json` and all of
+`experiment-flat/results/` are pre-async but stay put: the run and oracle-fit scripts
+read them as inputs.
 
 Depends on the architecture in [[async-unified-aif-agent]]; paper side in
 [[paper-payload-reframe]].

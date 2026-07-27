@@ -11,4 +11,7 @@
 *__pycache__
 archive/
 literature/
-*/results/
+# `**/` so this still covers experiment-simulation/experiment-*/results/ --
+# a plain `*/results/` only matches one level down and stopped applying when
+# the experiments were regrouped (2026-07-27).
+**/results/

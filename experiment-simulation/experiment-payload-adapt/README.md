@@ -1,4 +1,4 @@
-# experiment-payload-adapt
+# experiment-simulation/experiment-payload-adapt
 
 Event-triggered online CPG adaptation where the "terrain change" is a change of
 the **robot's own dynamics**: the Laikago walks on a flat plane carrying an 8 kg
@@ -14,35 +14,52 @@ is re-tuned — and it loads the attitude-PD channel where the tightened goal
 prior showed adaptation has traction. The shift is deliberately ramped so the
 discriminating signal is sustained mismatch, not an impulse.
 
-Phases: **1** (t < T/2) payload centered (mild, symmetric); **2** (t ≥ T/2)
-payload offset (persistent roll/pitch torque bias). The trigger baseline
-(2.4–3.4 s) lies inside phase 1, so the monitor detects the *shift*, not the
-payload itself.
+The bout is **continual**, not two-phase: the robot walks with the payload
+centered until the first event at `first_event_t` (4 s), the payload then shifts
+(persistent roll/pitch torque bias) and **stays** shifted until the robot falls;
+a fall recentres it and it re-engages after a random `--gap-min`..`--gap-max`
+gap. The detector's baseline comes from the settled walking before the first
+event, so the monitor detects the *shift*, not the payload itself.
 
 Implementation: collision-masked box (pure mass) + `JOINT_FIXED` constraint on
 the trunk; the shift ramps the constraint's child pivot. Trigger / squash /
 safeguard machinery and the method objects are imported unchanged from
-`experiment-flat2slope-adapt/run_experiment.py` (single source of truth).
+`methods/{continual_driver,event_responders,responder_worker}.py` (single source
+of truth; the precursor `experiment-flat2slope-adapt/` now lives under
+`archive/experiments/`).
 
 ## Protocol
 
 ```bash
 # 1. Fit per-phase optima AND run the cross-penalty screen (go/no-go):
-python experiment-payload-adapt/fit_payload_oracles.py --trials 60 --seeds 3
+python experiment-simulation/experiment-payload-adapt/fit_payload_oracles.py --trials 60 --seeds 3
 #    -> results/payload_optima.json; prints V(centered_opt|shifted) vs
 #       V(shifted_opt|shifted). If the gap is small, increase --mass /
 #       shift offsets before burning compute on the main comparison.
 
 # 2. Main comparison:
-python experiment-payload-adapt/run_experiment.py run \
-    --seeds 20 --arms noadapt grid bo marxefe oracle --workers 10
+python experiment-simulation/experiment-payload-adapt/run_experiment.py \
+    --arms noadapt grid bo esc safegp oracle aif \
+    --seeds 100 --duration 300 --jobs 20
 
 # 3. Aggregate + figures:
-python experiment-payload-adapt/analyze.py
+jupyter nbconvert --execute --inplace experiment-simulation/experiment-payload-adapt/analyze.ipynb
 ```
 
-Key options: `--mass` (kg), `--shift-lat` / `--shift-back` (m), `--duration`
-(shift always at duration/2), `--trigger {ce,dt,cusum}`, `--no-attitude-fb`.
+Payload options: `--mass` (kg), `--shift-lat` / `--shift-back` (m),
+`--shift-ramp-t` (s, how abruptly the shift engages).
+
+Key options: `--arms` (any of `noadapt grid bo esc safegp oracle aif`; the
+default is `event_responders.ALL_ARMS`, which does **not** include `aif` -- name
+it explicitly, as the reported runs do),
+`--seeds`, `--duration`, `--jobs` (parallel workers), `--out-dir` (write results
+elsewhere so the canonical ones are not overwritten), `--free-dims` (which CPG
+dims the arms search), `--sim-speed` (real-time pacing; this is what makes a
+slow `propose()` cost simulation steps), and the CUSUM detector knobs
+`--detect-kappa` / `--detect-h` / `--detect-tau` / `--no-detector`.
+
+Note `--duration 300`: the CLI default is 120 s and is not what the reported
+runs use (see `results/PROVENANCE.md`).
 
 ## Metrics
 
@@ -98,8 +115,8 @@ recoverable, 0.2375 not); >=10 kg breaks the safe-phase-1 design. For a
 fall-dominated regime run
 
 ```bash
-python experiment-payload-adapt/run_experiment.py run --shift-lat 0.225 --shift-back 0.225 ...
-python experiment-payload-adapt/fit_payload_oracles.py   # refit optima at the new offsets!
+python experiment-simulation/experiment-payload-adapt/run_experiment.py run --shift-lat 0.225 --shift-back 0.225 ...
+python experiment-simulation/experiment-payload-adapt/fit_payload_oracles.py   # refit optima at the new offsets!
 ```
 
 (no-adapt then falls 9/10 seeds; the surviving seed limps at vx ~0.07).

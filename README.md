@@ -21,17 +21,24 @@ a 3 s steady-state window of a 4.5 s episode).
 
 | Method | File | Role |
 |---|---|---|
-| **Grid search (LHS)** | `methods/grid_search.py` | Offline, non-adaptive reference (Latin-hypercube sample). |
+| **Grid search (LHS)** | `methods/event_responders.py` (`GridResponder`) | Offline, non-adaptive reference (Latin-hypercube sample). |
 | **Bayesian optimization** | `methods/bo_optimizer.py` | State-of-the-art black-box optimizer (GP surrogate + UCB). Selects one parameter set per episode. |
 | **MARX-EFE** (proposed) | `methods/marxefe_optimizer.py` | Active-inference agent: a matrix-normal Auto-Regressive eXogenous (MARX) model whose parameters are inferred by Bayesian filtering, with controls chosen by minimizing **Expected Free Energy (EFE)**. Can re-tune **within** an episode. |
 
 Supporting modules:
+- `methods/cpg_controller.py` — the joint-space CPG controllers (`JointCPG`,
+  `PerLegCPG`), pure NumPy so the real robot can run the same controller;
+  re-exported from `marxefe_optimizer` for existing call sites.
 - `methods/terrain.py` — pluggable ground: `flat`, `sloped`, `multislope`, and
   `friction` (spatially-varying ice/rubber, applied per simulation step).
 - `methods/cpg_bounds.py` — shared 8-D parameter bounds.
-- `methods/gpefe_optimizer.py` — a GP-based EFE variant (exploratory, not in the
-  main comparison).
-- `methods/GPEFE_derivations.md` — derivations for the EFE objective.
+- `methods/gp_safe_agent.py` — the safe GP recovery agent (`safegp` arm).
+- `methods/continual_driver.py`, `methods/continual_driver_aif.py` — the shared
+  continual-bout run loop (trigger → responder → apply) used by every experiment.
+- `methods/event_responders.py`, `methods/responder_worker.py` — the arms
+  (`noadapt`/`grid`/`bo`/`esc`/`safegp`/`oracle`/`aif`) and the out-of-process
+  worker that makes proposal latency cost simulation steps.
+- `methods/continual_analysis.py` — shared figure/summary code for the notebooks.
 
 ### MARX-EFE configuration notes
 - **Observation / goal**: the agent observes forward/lateral **velocity** and
@@ -50,24 +57,33 @@ Supporting modules:
 ## Repository layout
 
 ```
-methods/                     shared library (controllers, optimizers, terrain, bounds)
-experiment-flat/             static flat terrain (the baseline experiment)
-experiment-sloped/           random multi-slope terrain
-experiment-friction/         random ice/rubber friction zones (+ transition-recovery analysis)
+methods/                     shared library (controllers, optimizers, terrain, bounds,
+                             continual-bout driver, responder arms, analysis)
+experiment-simulation/       the PyBullet experiments
+  experiment-payload-adapt/    8 kg trunk payload shifting off the sagittal plane
+  experiment-damage-adapt/     partial actuator failure in one hind leg
+experiment-real/             Bittle hardware: the payload-shift experiment
+                             (`run_experiment.py` + `bittle_interface.py`) on the
+                             SAME driver/arms as the simulation, the vendored
+                             Petoi `PetoiRobot/` API, and `petoi_Hopf.py` (the
+                             original hand-tuned CPG demo)
+problem/                     problem-statement notebook + the Laikago schematic
+printing/                    3-D-printable Bittle CoM-shift harness (.scad/.stl)
+figures/                     the manuscript's figures (\graphicspath)
+archive/                     superseded experiments and scripts (kept for reference)
+notes/, literature/          working notes and papers
 root.tex, references.bib     the manuscript
 ```
 
 Every experiment folder is **self-contained and consistent**:
 
 ```
-experiment-*/
-  run_multiseed.py     runs grid / BO / MARX-EFE on this terrain across N seeds,
-                       one subprocess per seed, → results/, then a convergence figure
-  results/             canonical CSVs (one per method per seed) + figures/
-  archive/             superseded / precursor runs (kept for reference)
-  __init__.py
-experiment-friction/
-  transition_recovery.py   extra analysis: velocity recovery after friction drops
+experiment-simulation/experiment-*/
+  run_experiment.py    runs every arm over N seeds, one worker per seed, → results/
+  fit_*_oracles.py     fits the oracle arm's target + the cross-penalty screen
+  analyze.ipynb        thin notebook over methods/continual_analysis.py → figures
+  results/             continual_events.csv, continual_summary.csv, logs/*.npz,
+                       figures/, PROVENANCE.md, and archived pre-async runs
 ```
 
 Folders do **not** import from each other; each imports only from `methods/`, and
@@ -78,21 +94,44 @@ each writes to its own `results/` regardless of the working directory.
 From the repository root:
 
 ```bash
-# Flat baseline (single seed by default)
-python experiment-flat/run_multiseed.py
+# Payload-shift experiment: fit the oracle target + cross-penalty screen, then run
+python experiment-simulation/experiment-payload-adapt/fit_payload_oracles.py --trials 60 --seeds 3
+python experiment-simulation/experiment-payload-adapt/run_experiment.py \
+    --arms noadapt grid bo esc safegp oracle aif --seeds 100 --duration 300 --jobs 20
 
-# Sloped terrain (5 seeds of random multi-slope terrain)
-python experiment-sloped/run_multiseed.py --seeds 5
-
-# Friction terrain (20 seeds; each has a guaranteed reachable ice patch)
-python experiment-friction/run_multiseed.py --seeds 20 --trials 80
-python experiment-friction/transition_recovery.py   # recovery metric + figures
+# Leg-damage experiment (same protocol)
+python experiment-simulation/experiment-damage-adapt/fit_damage_oracles.py --trials 60 --seeds 3
+python experiment-simulation/experiment-damage-adapt/run_experiment.py \
+    --arms noadapt grid bo esc safegp oracle aif --seeds 100 --duration 300 --jobs 20
 ```
 
-Each `run_multiseed.py` supports `--seeds N`, `--trials N`, and `--seed K`
-(single-seed worker mode). Figures land in the experiment's `results/figures/`.
+Note `--duration 300`: the CLI default is 120 s and is not what the reported runs
+use (see each experiment's `results/PROVENANCE.md`). Figures come from the
+per-experiment `analyze.ipynb` and land in `results/figures/`.
+
+The Bittle experiment runs the same `methods/` driver and arms as the simulation,
+with the physics swapped for a serial link (see `experiment-real/README.md` for
+the bring-up checklist — IMU signs, harness end stops and control rate must be
+measured per robot):
+
+```bash
+cd experiment-real
+python run_experiment.py --mode rate     # achievable control rate -> --dt
+python run_experiment.py --mode imu      # IMU units + roll/pitch signs
+python run_experiment.py --mode walk --duration 20      # does the gait transfer?
+python run_experiment.py --arms noadapt aif safegp bo --seeds 3 --duration 120
+python run_experiment.py --dry-run --no-prompt --arms noadapt safegp  # no robot
+```
+
+The vendored `*Example.py` scripts and `petoi_Hopf.py` still need to be run from
+inside `experiment-real/` (they do `from PetoiRobot import *`).
 
 ## Results so far
+
+> These numbers predate the payload/damage reframing and come from the terrain
+> experiments now under `archive/experiments/` (`experiment-flat`,
+> `experiment-sloped`, `experiment-friction`). The current headline results are
+> falls-per-bout from `experiment-simulation/*/results/`.
 
 Objective `J` (higher is better) and fall rate, mean ± std over seeds:
 

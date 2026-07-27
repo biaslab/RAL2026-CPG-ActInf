@@ -1,4 +1,4 @@
-# experiment-damage-adapt
+# experiment-simulation/experiment-damage-adapt
 
 Event-triggered online CPG adaptation where the change is a **partial actuator
 failure in one leg**: the Laikago walks on a flat plane and halfway through the
@@ -26,37 +26,54 @@ parameterisation can express a compensating gait **at all** is exactly what the
 cross-penalty screen answers. If the damaged oracle is no better than no-adapt,
 the parameterisation — not the damage — is the bottleneck.
 
-Phases: **1** (t < T/2) all legs healthy; **2** (t ≥ T/2) one leg's hip+knee
-weakened (persistent drag + roll/pitch bias). The trigger baseline (2.4–3.4 s)
-lies inside phase 1, so the monitor detects the *damage*, not the healthy gait.
+The bout is **continual**, not two-phase: all legs are healthy until the first
+event at `first_event_t` (4 s), the target leg's hip+knee then droop (persistent
+drag + roll/pitch bias) and **stay** weak until the robot falls; a fall heals the
+leg and the damage re-engages after a random `--gap-min`..`--gap-max` gap. The
+detector's baseline comes from the settled healthy walking before the first
+event, so the monitor detects the *damage*, not the healthy gait.
 
 Implementation: the damaged leg's hip+knee `setJointMotorControl2` calls carry
 an explicit `force=` that ramps `healthy_force → damage_force`; healthy legs use
 the default (uncapped) force, and the abduction hold (500 N) is left intact — the
 damage models the sagittal propulsion actuators. Trigger / squash / safeguard
 machinery and the method objects are imported unchanged from
-`experiment-flat2slope-adapt/run_experiment.py` (single source of truth).
+`methods/{continual_driver,event_responders,responder_worker}.py` (single source
+of truth; the precursor `experiment-flat2slope-adapt/` now lives under
+`archive/experiments/`).
 
 ## Protocol
 
 ```bash
 # 1. Fit per-phase optima AND run the cross-penalty screen (go/no-go):
-python experiment-damage-adapt/fit_damage_oracles.py --trials 60 --seeds 3
+python experiment-simulation/experiment-damage-adapt/fit_damage_oracles.py --trials 60 --seeds 3
 #    -> results/damage_optima.json; prints V(incumbent|damaged) vs
 #       V(damaged_opt|damaged). If the gap is small the global params can't
 #       compensate -- lower --damage-force before the main comparison.
 
 # 2. Main comparison:
-python experiment-damage-adapt/run_experiment.py run \
-    --seeds 20 --arms noadapt grid bo marxefe oracle --workers 10
+python experiment-simulation/experiment-damage-adapt/run_experiment.py \
+    --arms noadapt grid bo esc safegp oracle aif \
+    --seeds 100 --duration 300 --jobs 20
 
 # 3. Aggregate + figures:
-python experiment-damage-adapt/analyze.py
+jupyter nbconvert --execute --inplace experiment-simulation/experiment-damage-adapt/analyze.ipynb
 ```
 
-Key options: `--leg {FL,FR,RL,RR}` (default `RR`; use a **hind** leg),
-`--healthy-force` / `--damage-force` (Nm), `--duration` (damage always at
-duration/2), `--trigger {ce,dt,cusum}`, `--no-attitude-fb`.
+Damage options: `--leg {FL,FR,RL,RR}` (default `RR`; use a **hind** leg),
+`--healthy-force` / `--damage-force` (Nm), `--seed-start` (offset the seed range).
+
+Key options: `--arms` (any of `noadapt grid bo esc safegp oracle aif`; the
+default is `event_responders.ALL_ARMS`, which does **not** include `aif` -- name
+it explicitly, as the reported runs do),
+`--seeds`, `--duration`, `--jobs` (parallel workers), `--out-dir` (write results
+elsewhere so the canonical ones are not overwritten), `--free-dims` (which CPG
+dims the arms search), `--sim-speed` (real-time pacing; this is what makes a
+slow `propose()` cost simulation steps), and the CUSUM detector knobs
+`--detect-kappa` / `--detect-h` / `--detect-tau` / `--no-detector`.
+
+Note `--duration 300`: the CLI default is 120 s and is not what the reported
+runs use (see `results/PROVENANCE.md`).
 
 ## Metrics
 

@@ -21,8 +21,8 @@ V(centered-opt | shifted) is NOT clearly worse than V(shifted-opt | shifted),
 there is no room for adaptation and the main experiment is not worth running.
 
 Usage (from repo root):
-    python experiment-payload-adapt/fit_payload_oracles.py [--trials 60 --seeds 3 --workers 2]
-Output: experiment-payload-adapt/results/payload_optima.json
+    python experiment-simulation/experiment-payload-adapt/fit_payload_oracles.py [--trials 60 --seeds 3 --workers 2]
+Output: experiment-simulation/experiment-payload-adapt/results/payload_optima.json
 """
 
 import argparse
@@ -35,7 +35,8 @@ from multiprocessing import get_context
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.dirname(_HERE)
+# experiment-simulation/experiment-payload-adapt/ -> repo root (two levels up)
+_REPO = os.path.dirname(os.path.dirname(_HERE))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
@@ -152,8 +153,10 @@ def main():
                     help="seeds for the final cross-penalty evaluation")
     a = ap.parse_args()
 
-    incumbent = np.asarray(json.load(open(os.path.join(
-        _REPO, "experiment-flat", "results", "selected_params.json")))["params"], float)
+    # Flat-optimal incumbent: results/incumbent.json, falling back to the
+    # hard-coded copy in run_experiment.py (keeps the folder self-contained; the
+    # original experiment-flat BO fit now lives under archive/experiments/).
+    incumbent = _pl().load_incumbent()
 
     os.makedirs(RESULTS, exist_ok=True)
     jobs = [(cond, incumbent, a.trials, a.seeds) for cond in CONDITIONS]
