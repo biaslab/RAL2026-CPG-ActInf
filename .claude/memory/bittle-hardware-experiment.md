@@ -38,6 +38,24 @@ Other hardware facts worth not rediscovering:
   only honest metric anyway.
 - `--dry-run` rehearses the whole chain with a null serial transport plus a caricature
   `SyntheticRobot`; it is for plumbing only, never for numbers.
+- **Attitude convention: `pitch > 0` is nose UP, `roll > 0` is right-side DOWN.**
+  `get_observation` unpacks the simulated euler angles as `pitch, roll, yaw` with the
+  robot walking in +Y, so euler[0] (about world X) is a nose-up-positive pitch and
+  euler[1] (about the forward axis) is a right-down-positive roll — and
+  `JointCPG.ROLL_SIGN/PITCH_SIGN = -1,-1` were fit against THAT. `--mode imu` and the
+  README told the operator the opposite for pitch until 2026-07-28; following the old
+  text sets `--pitch-sign -1` and makes the pitch channel drive the robot over.
+- A regression of the knee correction on roll/pitch can NEVER catch an inverted IMU:
+  the correction is computed from whatever attitude it was handed, so the IMU sign
+  cancels. Only a physical two-attitude check against a level reference
+  (`stand_test.py --mode sign`) or the operator's eyes establish it.
+- `experiment-real/stand_test.py` is the on-a-stand bench test of the control loop
+  (`--mode sign|still|walk`, `--inject` for a synthetic attitude, `--no-attitude` for
+  the open-loop reference): same `control_tick` + VMC path as a bout, with the harness,
+  detector, responders and fall logic removed. It reports achieved rate, joint travel
+  vs the safety limits, clip saturation, and how often the correction fell below the
+  servos' **1 deg quantum** — which is a quarter of the 4.2 deg `DKNEE_CLIP`, so
+  posture authority on hardware is coarse.
 
 **Why:** anyone touching the hardware path will hit the integration-rate trap first,
 and it manifests as a mid-run crash (or slammed servos), not as an obviously wrong

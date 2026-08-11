@@ -22,6 +22,7 @@ physics is swapped:
 
 ```
 run_experiment.py     the experiment + the bring-up modes (--mode)
+stand_test.py         CPG + attitude loop on a STAND: no event, no fall logic
 bittle_interface.py   BittleCPG, BittleLink (serial), BittlePhysics (driver contract)
 petoi_Hopf.py         the original hand-tuned open-loop CPG demo (the calibration anchor)
 *Example.py           vendored Petoi examples
@@ -50,8 +51,12 @@ python run_experiment.py --mode walk --duration 20   # 4. does the incumbent wal
    link can sustain, the gait runs *slower* than commanded. Round the reported
    median up and pass it as `--dt`; `--imu-every 2` buys rate at the cost of a
    staler attitude reading.
-2. **IMU.** Tilt the robot and check the printed signs: `roll > 0` banking right,
-   `pitch > 0` nose down. If either is inverted, run everything afterwards with
+2. **IMU.** Tilt the robot and check the printed signs: `roll > 0` right side
+   down (banking right), `pitch > 0` **nose up** — that is the convention the
+   attitude gains were validated in (`get_observation` unpacks the simulated
+   euler angles as `pitch, roll, yaw` with the robot walking in +Y). Prefer
+   `stand_test.py --mode sign`, which does this against a level reference and
+   prints a verdict. If either is inverted, run everything afterwards with
    `--roll-sign -1` / `--pitch-sign -1` — the VMC attitude feedback pushes the
    robot *over* with the wrong sign. If no values appear at all, the firmware may
    silence the IMU when gyro balancing is off: retry with `--keep-gyro`.
@@ -63,6 +68,35 @@ python run_experiment.py --mode walk --duration 20   # 4. does the incumbent wal
    failure mode of the simulated optimum — see the `backward-gait-ceiling` note).
    If it barely moves, retune on the robot and save the result as
    `results/incumbent.json` (`{"params": [...8 floats...]}`).
+
+### 4b. On the stand, before the floor
+
+`stand_test.py` runs the same control loop as a bout — `BittleCPG.control_tick`
+sub-stepped at `--cpg-dt`, plus the VMC attitude correction — with the payload
+harness, the detector, the responders and the fall logic all removed, so the only
+things under test are the oscillators, the joint mapping and the attitude
+feedback. Feet off the ground, so a wrong sign or a hot gain costs nothing:
+
+```bash
+python stand_test.py --mode sign                     # IMU direction, guided (do this first)
+python stand_test.py --mode still --duration 30      # only the posture correction moves the knees
+python stand_test.py --mode walk  --duration 30      # gait + correction together
+python stand_test.py --mode still --inject roll      # synthetic attitude: no hands needed
+python stand_test.py --mode walk --no-attitude       # open-loop reference
+```
+
+`--mode sign` is the one step nothing else can replace: every other check
+regresses the knee correction against the attitude the controller was *handed*,
+so an inverted IMU passes them all and only shows up when the robot goes over on
+the floor. It holds the robot in two known attitudes against a level reference,
+reports the response and the cross-axis leak (which catches a firmware that does
+not order the `v` token as yaw/pitch/roll), and names the flag to fix.
+
+Each run writes `results/standtest_<mode>_<stamp>.npz` with the per-tick trace
+(attitude in and measured, per-leg correction, commanded angles, CPG state) and
+prints the achieved control rate, joint travel against the safety limits, how
+often the correction saturated its ±4.2° clip, and how often it fell below the
+servos' 1° quantum.
 
 Then a first supervised bout, and a session:
 

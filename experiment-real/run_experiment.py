@@ -276,11 +276,19 @@ def mode_imu(a):
     """Stream IMU readings so the operator can verify units and SIGNS."""
     link = make_link(a)
     link.connect()
+    # The convention below is the one the attitude gains were validated in:
+    # methods.marxefe_optimizer.get_observation unpacks the simulated attitude as
+    # `pitch, roll, yaw = getEulerFromQuaternion(...)` with the robot walking in
+    # +Y, which makes euler[0] a nose-UP-positive pitch and euler[1] a
+    # right-side-DOWN-positive roll. Feed the loop the opposite pitch sign and
+    # the pitch channel drives the robot over instead of leveling it.
     print("\n  Tilt the robot and check the signs the CPG's attitude feedback "
-          "assumes:\n    roll  > 0  when the LEFT side goes UP (banking right)\n"
-          "    pitch > 0  when the NOSE goes DOWN\n"
+          "assumes:\n    roll  > 0  when the RIGHT side goes DOWN (banking right)"
+          "\n    pitch > 0  when the NOSE goes UP\n"
           "  If either is inverted, re-run everything with --roll-sign -1 "
-          "and/or --pitch-sign -1.\n  Ctrl-C to stop.\n")
+          "and/or --pitch-sign -1.\n"
+          "  `stand_test.py --mode sign` does this as a guided check with a "
+          "level reference and a verdict.\n  Ctrl-C to stop.\n")
     try:
         while True:
             imu = link.read_imu()
