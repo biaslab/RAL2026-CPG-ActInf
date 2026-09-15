@@ -1,17 +1,13 @@
-# Latex
+# local
+literature/
+template/
+*__pycache__/
+*.npz
+*.pkl
+
+# latex
 *.aux
 *.bbl
 *.blg
-*.fdb_latexmk
-*.fls
 *.log
 *.synctex.gz
-
-# local
-*__pycache__
-archive/
-literature/
-# `**/` so this still covers experiment-simulation/experiment-*/results/ --
-# a plain `*/results/` only matches one level down and stopped applying when
-# the experiments were regrouped (2026-07-27).
-**/results/

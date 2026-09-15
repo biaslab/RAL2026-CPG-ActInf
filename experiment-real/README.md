@@ -23,6 +23,7 @@ physics is swapped:
 ```
 run_experiment.py     the experiment + the bring-up modes (--mode)
 stand_test.py         CPG + attitude loop on a STAND: no event, no fall logic
+shifter_test.py       is the CoM mass shifter plugged in, and on which pin?
 bittle_interface.py   BittleCPG, BittleLink (serial), BittlePhysics (driver contract)
 petoi_Hopf.py         the original hand-tuned open-loop CPG demo (the calibration anchor)
 *Example.py           vendored Petoi examples
@@ -60,14 +61,74 @@ python run_experiment.py --mode walk --duration 20   # 4. does the incumbent wal
    `--roll-sign -1` / `--pitch-sign -1` — the VMC attitude feedback pushes the
    robot *over* with the wrong sign. If no values appear at all, the firmware may
    silence the IMU when gyro balancing is off: retry with `--keep-gyro`.
-3. **Harness.** Verify the slug reaches both ends without the servo stalling, then
-   set `--shift-centered` / `--shift-shifted`. No harness fitted? `--manual-shift`
-   prompts you to move the payload by hand at each event.
+
+   **The IMU has two switches and only one is safe to touch.** `gb` toggles the
+   firmware's balancing *behaviour* (which has to go, or it fights the CPG for
+   the joints) and leaves the IMU sampling; `G` switches the IMU *module* off,
+   after which `v` still answers — with the last sample it ever took, frozen,
+   until the robot is power-cycled. `PetoiRobot.deacGyro()` sends `G` on
+   NyBoard-class firmware, so `BittleLink.connect()` does not call it: it sends
+   `gb` itself and then verifies the IMU is actually changing. If a run ever
+   aborts with "the IMU is FROZEN", power-cycle the robot — nothing on the
+   serial link brings it back.
+3. **Harness.** `shifter_test.py --scan` first, if you have just plugged the
+   servo in. Two things make "which pin is it on?" harder than it looks, and
+   both have already cost a debugging round:
+   - The board's numbers are not the joint indices. Per
+     [Petoi](https://bittle.petoi.com/4-connect-the-wires/nyboard), "the index
+     number of the joint servo has no corresponding relationship with the PWM
+     PIN on the main board" — the silkscreen tells you nothing about which
+     index to command, so sweep rather than read.
+   - Motion at startup is not evidence. Connecting reboots the board and every
+     joint snaps to its rest angle before the test runs; only the creep and
+     swing phases count, which is why `--scan` sweeps all pins inside one
+     connection.
+
+   Nor can the link help: nothing on it distinguishes a connected pin from an
+   empty one (the PWM expander has no feedback and the joint readback reports
+   what was *commanded*), so the script swings each spare pin a few degrees and
+   asks you, while measuring whether the trunk attitude tracks the swing as
+   corroboration. It refuses ports 8–15 — those are the gait's own joints, and a
+   pin shared between a leg and the harness is double-booked inside the single
+   `I` packet each control tick writes (`BittlePhysics` refuses such a
+   `--shift-port` outright). If the servo really is in that block, put the robot
+   on a stand, find it with `--scan --include-legs` or `--port N --force`, then
+   move the lead to a spare pin before any walking run.
+
+   Once the pin is known, `--find-travel` creeps outward one side at a time and
+   asks you to call each end stop, then prints the `--shift-centered` /
+   `--shift-shifted` pair with a margin — the servo's zero is *not* mid-rack, so
+   do this before `--mode shift` cycles the full ramp. No harness fitted?
+   `--manual-shift` prompts you to move the payload by hand at each event.
 4. **Walk.** The incumbent must actually walk before any arm means anything. If
    the robot walks *backwards*, swap the sign of the hip mapping (this is a known
    failure mode of the simulated optimum — see the `backward-gait-ceiling` note).
    If it barely moves, retune on the robot and save the result as
    `results/incumbent.json` (`{"params": [...8 floats...]}`).
+
+   **Dragging feet / not clearing the ground** is the common one, and the raw
+   parameters hide how small the motion is. `JointCPG.step` drives the knee in
+   swing only —
+
+   ```python
+   knee_angles = self.KNEE_OFFSET - knee_amp * np.maximum(0.0, y_new)
+   ```
+
+   — and the limit cycle has radius √U = 1.414, so the simulated incumbent's
+   `kneeA` is **8.5° of knee rotation**, a few millimetres of foot lift, before
+   any servo droop under the payload. `bi.travel_degrees()` reports it and
+   `stand_test.py` prints it every run. Two independent knobs:
+
+   - `--knee-lift DEG` — how far the foot is picked up (the gait vector's
+     `kneeA`, in degrees at the joint). This is ground clearance.
+   - `--knee-offset DEG` — the stance knee angle, i.e. how extended the legs are
+     and how high the trunk rides. This is what a payload squashing the servos
+     eats into. The park pose follows it, in both scripts, so the robot does not
+     drop to the default crouch whenever it settles or recovers.
+
+   Note that `DKNEE_CLIP` (±4.2°) does **not** scale with the gait, so doubling
+   the knee lift halves the attitude correction's authority relative to the
+   stride — compensate with `--attitude-gain` if the leveling gets sloppy.
 
 ### 4b. On the stand, before the floor
 
@@ -144,6 +205,40 @@ reviewer will ask about:
 * **The oracle arm needs a hardware fit.** The simulated optimum is not an oracle
   for this robot; the arm refuses to run until `results/payload_optima.json`
   exists.
+* **The control rate is capped by the firmware at ~29-40 Hz, and that is what
+  makes the walk look jittery.** Measured on `N_250224` (2026-08-19):
+
+  | path | period | rate |
+  |---|---|---|
+  | joint write + IMU read | 34.8 ms | 28.8 Hz |
+  | joint write alone | 27.7 ms | 36 Hz |
+  | `--imu-every 2` (read amortised over two ticks) | 30.9 ms | 32.3 Hz |
+
+  Three things it is *not*, each measured rather than assumed:
+
+  - **Not the packet.** 18 bytes is 1.25 ms at 115200, and `I` is the
+    *simultaneous* binary move — ardSerial's skill compiler builds one row for
+    `i`/`I`, one row per joint for `m`.
+  - **Not the host.** Deleting the vendored `time.sleep(0.01)` in
+    `serialWriteByte` and the 1 ms poll in `printSerialMessage` changes the
+    period by under a millisecond.
+  - **Not the token echo.** Skipping the ack looks like free rate — the board
+    swallows joint packets at ~40 Hz when nothing else is asked of it — but a
+    `v` sent straight after a binary packet is consumed as payload (11/40 IMU
+    reads survived), and the 5 ms settle that fixes it leaves the tick at
+    36.1 ms, *slower* than waiting. The IMU read then costs ~31 ms instead of
+    ~7 ms: the firmware's per-command work is conserved either way. `--imu-every`,
+    which skips whole reads, is the only lever that moves the rate.
+
+  The consequence is mechanical: the servos hold the last commanded angle and
+  slew to each new one at ~600°/s, so a tick is a short burst of motion followed
+  by a standstill. At the simulated incumbent's 0.366 s stride, 29 Hz gives ~10
+  commands per stride and a ~7° step per tick — roughly 12 ms of motion then
+  23 ms of stillness. **No filtering removes this**; it is the sample rate
+  against the gait frequency. The knobs that help are `--imu-every 2` (rate) and a
+  longer stride (`stand_test.py --stride`, which scales `w_swing`/`w_stance`
+  together and preserves their ratio). Both scripts warn below
+  `TICKS_PER_STRIDE_MIN` = 20 commands per stride.
 * **Bout length is limited by the arena**, not by the script: the robot walks away
   from its start position and nothing recentres it.
 

@@ -1,0 +1,14 @@
+{
+  "params": [
+    7.607,
+    13.0498,
+    25.0,
+    52.4044,
+    0.5,
+    0.1,
+    0.5,
+    10.0
+  ],
+  "source": "experiment-flat BO fit (archived); flat-optimal incumbent",
+  "note": "used as the pre-event gait all arms start from"
+}

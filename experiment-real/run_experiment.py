@@ -29,9 +29,15 @@ Results are written in the simulator's schema, so
   results/continual_summary.csv  per-method aggregates, regenerated each session
   results/logs/<arm>_seed<k>.npz per-bout step traces
 
+Transport is USB serial by default. ``--wifi`` swaps in a TCP link to the dongle
+running ``sketch_wifidongle.ino`` (``./find_bittle.sh`` locates it); the robot then
+walks untethered, at the cost of a round trip on every acknowledged command, so
+``--mode rate`` MUST be re-run to re-pick ``--dt``.
+
 Bring-up (do these in order, on a fresh battery, before any real run)::
 
     cd experiment-real
+    ./find_bittle.sh                                # WiFi only: the dongle's IP
     python run_experiment.py --mode rate            # achievable control rate -> --dt
     python run_experiment.py --mode imu             # IMU units + roll/pitch SIGNS
     python run_experiment.py --mode shift           # harness end stops
@@ -41,6 +47,9 @@ Bring-up (do these in order, on a fresh battery, before any real run)::
 Full session (supervised, one bout at a time, ~2 min each)::
 
     python run_experiment.py --arms noadapt aif safegp bo --seeds 3 --duration 120
+
+Over WiFi, add ``--wifi`` (AP mode) or ``--wifi $(./find_bittle.sh)`` (station
+mode) to any of the above.
 
 Everything can be rehearsed without a robot -- driver, responders, logging -- with
 ``--dry-run``, which swaps in a null serial transport plus a synthetic body
@@ -117,10 +126,29 @@ def build_spec(arm, incumbent, box, free, oracle_target, seed, a):
         v_fall=cd.BoutConfig().v_fall)
 
 
+def add_wifi_args(g):
+    """Transport flags, shared with the bring-up scripts that build own parsers."""
+    g.add_argument("--wifi", nargs="?", const=bi.WIFI_HOST_AP, default=None,
+                   metavar="HOST",
+                   help="talk to the robot over the WiFi dongle's TCP bridge "
+                        "instead of USB. Bare --wifi uses the AP-mode address "
+                        f"{bi.WIFI_HOST_AP}; pass an IP for station mode "
+                        "(./find_bittle.sh prints one). Needs "
+                        "sketch_wifidongle.ino on the dongle -- Petoi's stock "
+                        "sketch is write-only and cannot read the IMU.")
+    g.add_argument("--wifi-port", type=int, default=bi.WIFI_PORT,
+                   help="TCP port of the bridge (default %(default)s)")
+    return g
+
+
 def make_link(a):
+    # getattr: the bring-up scripts (stand_test, shifter_test) build their own
+    # parsers and reuse this constructor, so a missing flag must mean USB.
     return bi.BittleLink(dry_run=a.dry_run, imu_units=a.imu_units,
                          roll_sign=a.roll_sign, pitch_sign=a.pitch_sign,
-                         keep_gyro=a.keep_gyro)
+                         keep_gyro=a.keep_gyro,
+                         wifi_host=getattr(a, "wifi", None),
+                         wifi_port=getattr(a, "wifi_port", bi.WIFI_PORT))
 
 
 def make_physics(a, dt, incumbent=None, box=None, seed=0):
@@ -138,6 +166,8 @@ def make_physics(a, dt, incumbent=None, box=None, seed=0):
         contacts=a.contacts, cpg_dt=a.cpg_dt, attitude=not a.no_attitude,
         attitude_gain=a.attitude_gain, fall_tilt_deg=a.fall_tilt,
         vx_source=a.vx_source, acc_axis=a.acc_axis,
+        att_tau=a.imu_lpf, cmd_hys=a.cmd_hys,
+        hip_offset=a.hip_offset, knee_offset=a.knee_offset,
         # a synthetic robot cannot be picked up, so the rehearsal never waits
         recover=("auto" if a.dry_run else a.recover),
         recover_skill=a.recover_skill,
@@ -200,6 +230,10 @@ def run_bout(arm, seed, a, incumbent, box, free, oracle_target, dt):
               f"asking for more travel than allowed")
     if link.n_imu_fail:
         print(f"  !! {link.n_imu_fail} IMU reads failed (last good value reused)")
+    if link.max_imu_stale > 20:
+        print(f"  !! the IMU repeated the same sample {link.max_imu_stale} times "
+              f"in a row -- it froze mid-run, so the attitude feedback and the "
+              f"tilt CUSUM were both blind from then on. Power-cycle the robot.")
     return log, events
 
 
@@ -258,16 +292,27 @@ def mode_rate(a):
     link = make_link(a)
     link.connect()
     try:
-        med, worst = link.measure_period(n=a.calib_ticks)
-        print(f"\n  median tick {1000 * med:6.1f} ms ({1 / med:5.1f} Hz), "
-              f"worst {1000 * worst:6.1f} ms  "
-              f"[joint write + IMU read, --imu-every 1]")
-        print(f"  -> run with --dt {max(0.01, np.ceil(med * 100) / 100):.2f} "
-              f"(round the median UP; the CPG integrates at --dt, so a dt below "
-              f"the achievable period makes the gait run slower than commanded)")
-        if a.imu_every > 1:
-            print(f"  (--imu-every {a.imu_every} would amortise the IMU read over "
-                  f"{a.imu_every} ticks)")
+        med_f, worst_f = link.measure_period(n=a.calib_ticks, read_imu=True)
+        med_w, worst_w = link.measure_period(n=a.calib_ticks, read_imu=False)
+        print(f"\n  joint write + IMU read {1000 * med_f:6.1f} ms "
+              f"({1 / med_f:5.1f} Hz), worst {1000 * worst_f:6.1f} ms")
+        print(f"  joint write alone      {1000 * med_w:6.1f} ms "
+              f"({1 / med_w:5.1f} Hz), worst {1000 * worst_w:6.1f} ms")
+        print(f"  This is the FIRMWARE's turnaround, not the host's: removing "
+              f"the vendored sleeps in\n  PetoiRobot.ardSerial changes it by "
+              f"under a millisecond, so the rate cannot be bought back in "
+              f"Python.")
+        for k in (1, 2, 3):
+            t = med_w + max(0.0, med_f - med_w) / k
+            print(f"  --imu-every {k}: average tick {1000 * t:5.1f} ms "
+                  f"-> --dt {max(0.01, np.ceil(t * 200) / 200):.3f} "
+                  f"({1 / max(0.01, np.ceil(t * 200) / 200):4.1f} Hz)")
+        stride = bi.stride_period(load_incumbent(a.incumbent_json))
+        dt0 = max(0.01, np.ceil(med_f * 200) / 200)
+        print(f"  The incumbent's stride is {stride:.3f}s, so at --dt {dt0:.3f} "
+              f"it gets {stride / dt0:.0f} commands;\n  under "
+              f"{bi.TICKS_PER_STRIDE_MIN} and the gait is a visible staircase "
+              f"(stand_test.py --stride stretches it).")
     finally:
         link.close()
 
@@ -297,9 +342,12 @@ def mode_imu(a):
                       "firmware? try --keep-gyro", flush=True)
             else:
                 roll, pitch, yaw, acc = imu
+                # `stale` is the tell for a switched-off IMU module: 'v' keeps
+                # answering, with the same sample forever.
+                stale = "  FROZEN" if link._stale_streak > 20 else ""
                 print(f"\r  roll {np.rad2deg(roll):+7.1f}  "
                       f"pitch {np.rad2deg(pitch):+7.1f}  "
-                      f"yaw {np.rad2deg(yaw):+7.1f} deg   acc {acc}      ",
+                      f"yaw {np.rad2deg(yaw):+7.1f} deg   acc {acc}{stale}      ",
                       end="", flush=True)
             time.sleep(0.1)
     except KeyboardInterrupt:
@@ -391,6 +439,7 @@ def main():
     ap.add_argument("--out-dir", default=RESULTS_DIR)
 
     g = ap.add_argument_group("robot / timing")
+    add_wifi_args(g)
     g.add_argument("--dt", type=float, default=None,
                    help="control period [s]. Default: measured at startup "
                         "(--mode rate reports it). The CPG integrates at this "
@@ -439,6 +488,22 @@ def main():
     g.add_argument("--recover-pause", type=float, default=5.0)
 
     g = ap.add_argument_group("payload harness")
+    g.add_argument("--knee-offset", type=float, default=None,
+                   help=f"[deg] stance knee angle (default "
+                        f"{bi.KNEE_OFFSET_DEG:g}); raising it extends the legs "
+                        f"and lifts the trunk. The gait's own knee LIFT lives in "
+                        f"the gait vector (results/incumbent.json) -- "
+                        f"stand_test.py --knee-lift tunes it")
+    g.add_argument("--hip-offset", type=float, default=None,
+                   help=f"[deg] stance hip angle (default {bi.HIP_OFFSET_DEG:g})")
+    g.add_argument("--imu-lpf", type=float, default=0.06,
+                   help="[s] low-pass time constant on the attitude fed to the "
+                        "knee correction (0 disables). Keep this equal to "
+                        "stand_test.py's, or the bench test is not the loop the "
+                        "experiment runs")
+    g.add_argument("--cmd-hys", type=float, default=0.25,
+                   help="[deg] hysteresis at the whole-degree rounding boundary, "
+                        "against servo dither (0 disables)")
     g.add_argument("--shift-port", type=int, default=bi.SHIFT_PORT,
                    help="servo index driving the rack-and-pinion CoM harness")
     g.add_argument("--shift-centered", type=float, default=0.0,
@@ -491,12 +556,26 @@ def main():
         link = make_link(a)
         link.connect()
         try:
-            med, worst = link.measure_period(n=a.calib_ticks)
+            med, worst, t_w, t_f = link.amortised_period(
+                imu_every=a.imu_every, n=a.calib_ticks)
         finally:
             link.close()
-        dt = max(0.01, float(np.ceil(med * a.imu_every * 100) / 100))
-        print(f"[timing] measured tick {1000 * med:.1f} ms (worst "
+        # 5 ms grid: at a ~34 ms tick the old 10 ms grid discarded 16% of the
+        # achievable rate, and the rate is what the gait is starved of.
+        dt = max(0.01, float(np.ceil(med * 200) / 200))
+        print(f"[timing] average tick {1000 * med:.1f} ms (worst "
               f"{1000 * worst:.1f} ms) -> dt = {dt:g} s ({1 / dt:.0f} Hz)")
+        if a.imu_every > 1:
+            print(f"[timing]   write {1000 * t_w:.1f} ms, write+read "
+                  f"{1000 * t_f:.1f} ms, IMU read every {a.imu_every} ticks")
+        stride = bi.stride_period(incumbent)
+        if stride / dt < bi.TICKS_PER_STRIDE_MIN:
+            print(f"[timing] !! {stride / dt:.0f} commands per {stride:.2f}s "
+                  f"stride -- the servos hold the last command, so the gait is "
+                  f"executed as a staircase.\n"
+                  f"         Slow the gait (results/incumbent.json; "
+                  f"stand_test.py --stride finds a value) or the walk will be "
+                  f"jerky no matter what the controller does.")
 
     if a.mode == "rate":
         return mode_rate(a)

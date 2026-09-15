@@ -38,6 +38,16 @@ WHAT TO ACTUALLY DO ON THE STAND
    leveling law numerically, but only as far as the attitude the controller was
    HANDED (see the caveat it prints).
 
+   Two smoothers run in both this script and ``run_experiment.py`` (same
+   constants, so the bench test is the loop the experiment runs): ``--imu-lpf``
+   low-passes the attitude BEFORE the knee correction, because walking vibration
+   puts several degrees of noise on the IMU while the correction is only ~4 deg
+   wide; and ``--cmd-hys`` adds hysteresis at the whole-degree rounding boundary,
+   so a target sitting on a .5 stops dithering between two degrees every tick.
+   Set either to 0 to see the unsmoothed behaviour. If the legs still jitter with
+   ``--no-attitude``, the feedback is not the source -- look at the control rate
+   and ``--cpg-dt`` instead.
+
 2. ``--mode walk`` next: the gait runs and the correction is superimposed. Watch
    for the correction fighting the gait (legs stuttering at the swing/stance
    transition) and for clipped joint commands, both reported at the end.
@@ -61,6 +71,12 @@ the loop a pitch that is positive nose-DOWN and the pitch channel drives the
 robot over instead of leveling it. (Note this contradicts the pitch line printed
 by ``run_experiment.py --mode imu`` in earlier revisions -- the convention above
 is the one the gains were fit in.)
+
+The mass shifter is homed at the start of every run (``--shift-home``, default
+-45 deg): the harness rests about 45 deg off the trunk axis, so left alone the
+slug lies ACROSS the walking direction and its CoM offset is in the wrong axis
+for the whole run. Flip the sign if it comes out perpendicular; ``none`` leaves
+the servo untouched.
 
 Output: ``results/standtest_<mode>_<stamp>.npz`` with the full per-tick trace
 (attitude in, attitude measured, per-leg correction, commanded joint angles, CPG
@@ -128,6 +144,13 @@ def mode_sign(a):
                 raise SystemExit(
                     "  the IMU returned almost nothing. On some firmware the "
                     "gyro switch also silences it -- retry with --keep-gyro.")
+            if len(set(zip(r, p))) == 1:
+                raise SystemExit(
+                    "  the IMU is FROZEN: every read returned the identical "
+                    "sample, so the module is off and 'v' is echoing its last "
+                    "one. Power-cycle the robot -- this does not clear without "
+                    "a reboot. (Without this check it looks like you simply did "
+                    "not tilt far enough.)")
             return np.rad2deg(np.mean(r)), np.rad2deg(np.mean(p)), len(r)
 
         print("\n  IMU SIGN CHECK. Hold the robot by hand (or tilt the stand); "
@@ -178,8 +201,14 @@ def mode_sign(a):
         link.close()
 
 
+def _opt_float(v):
+    """A float, or None for 'none'/'off' -- lets --shift-home opt out entirely."""
+    return None if str(v).strip().lower() in ("none", "off") else float(v)
+
+
 def build_cpg(a):
-    cpg = bi.BittleCPG(n_legs=4, attitude_gain=a.attitude_gain)
+    cpg = bi.BittleCPG(n_legs=4, attitude_gain=a.attitude_gain,
+                       hip_offset=a.hip_offset, knee_offset=a.knee_offset)
     cpg.ATTITUDE_FEEDBACK = not a.no_attitude
     return cpg
 
@@ -224,6 +253,30 @@ def run(a, incumbent, dt):
           f"{n} ticks, CPG sub-stepped at {a.cpg_dt:g}s")
     print(f"  gait   : {np.round(incumbent, 3).tolist()}"
           f"{'  (amplitudes zeroed: still)' if a.mode == 'still' else ''}")
+    hip_sweep, knee_lift = bi.travel_degrees(incumbent)
+    print(f"  travel  : hip +-{hip_sweep:.1f} deg about {cpg.HIP_OFFSET:g}, "
+          f"knee lift {knee_lift:.1f} deg from {cpg.KNEE_OFFSET:g} "
+          f"(swing only)")
+    stride = bi.stride_period(incumbent)
+    tps = stride / dt
+    print(f"  stride  : {stride:.3f}s ({1 / stride:.2f} Hz) -> {tps:.1f} commands "
+          f"per stride" + ("" if tps >= bi.TICKS_PER_STRIDE_MIN else
+                           "   !! see below"))
+    if tps < bi.TICKS_PER_STRIDE_MIN:
+        w_slow = stride * (bi.TICKS_PER_STRIDE_MIN / tps)
+        print(f"    !! the servos hold the last command, so this stride is "
+              f"executed as a {tps:.0f}-step staircase.\n"
+              f"       This is NOT smoothable -- it is the control rate against "
+              f"the gait frequency.\n"
+              f"       Either slow the gait (scale w_swing/w_stance by "
+              f"{stride / w_slow:.2f} for a {w_slow:.2f}s stride) or raise the "
+              f"rate\n       (--imu-every 2 buys the IMU read back; the link "
+              f"itself is firmware-bound).")
+    print(f"  smoothing: attitude low pass "
+          + (f"tau={a.imu_lpf:g}s (alpha={bi.lpf_alpha(a.imu_lpf, dt):.2f})"
+             if a.imu_lpf > 0 else "OFF")
+          + f", command hysteresis "
+          + (f"+-{a.cmd_hys:g} deg" if a.cmd_hys > 0 else "OFF"))
     print(f"  attitude feedback: "
           f"{'OFF (open loop)' if a.no_attitude else f'ON, gains x{a.attitude_gain:g} -> kp_roll={cpg.kp_roll:.2f}, kp_pitch={cpg.kp_pitch:.2f} knee-deg/rad, clip +-{cpg.DKNEE_CLIP:.1f} deg'}")
     if a.inject != "none":
@@ -243,13 +296,29 @@ def run(a, incumbent, dt):
     CX, CY = np.zeros((n, 4)), np.zeros((n, 4))          # oscillator state
     FRESH = np.zeros(n, dtype=bool)            # was the IMU read this tick?
 
+    RS, PS = np.zeros(n), np.zeros(n)          # the low pass's INPUT (rad):
+                                               # differs from *_meas only under
+                                               # --inject
+
     n_clipped = n_quant = 0
     roll = pitch = 0.0
+    att_f = None                               # filtered attitude state
+    alpha = bi.lpf_alpha(a.imu_lpf, dt)
+    quant = bi.CommandQuantizer(a.cmd_hys)
     k = 0
     link.connect()
     t_wall0 = time.perf_counter()
     try:
-        link.joints(link.neutral_pose())       # shift servo deliberately untouched
+        # The harness rests ~45 deg off the trunk axis, so unless it is homed the
+        # slug starts across the walking direction and its CoM offset is in the
+        # wrong axis for the whole run.
+        link.joints(link.neutral_pose(shift_deg=a.shift_home,
+                                      hip_deg=a.hip_offset,
+                                      knee_deg=a.knee_offset))
+        if a.shift_home is not None:
+            print(f"  slug homed: servo {bi.SHIFT_PORT} -> {a.shift_home:+g} deg "
+                  f"(flip the sign if it ends up across the walking direction, "
+                  f"not along it)")
         time.sleep(a.settle)
         t_wall0 = time.perf_counter()
         for k in range(n):
@@ -262,7 +331,16 @@ def run(a, incumbent, dt):
                     roll, pitch, _yaw, _acc = imu
                 FRESH[k] = imu is not None
             inj = injected_attitude(a, t)
-            r_in, p_in = (roll, pitch) if inj is None else inj
+            r_raw, p_raw = (roll, pitch) if inj is None else inj
+            # Smooth what the CONTROLLER sees; the raw values still go to the
+            # log and the sign check, so filtering cannot fake a passing test.
+            if alpha >= 1.0:
+                r_in, p_in = r_raw, p_raw
+            else:
+                att_f = (r_raw, p_raw) if att_f is None else (
+                    att_f[0] + alpha * (r_raw - att_f[0]),
+                    att_f[1] + alpha * (p_raw - att_f[1]))
+                r_in, p_in = att_f
 
             params = gait_vector(a, incumbent, t)
             # Same composition as BittleCPG.control_tick, but with the two terms
@@ -288,8 +366,8 @@ def run(a, incumbent, dt):
                 kk = float(np.clip(knees_cmd[j], *bi.KNEE_RANGE_DEG))
                 n_clipped += int(hips[j] != h) + int(knees_cmd[j] != kk)
                 hip_deg[j], knee_deg[j] = h, kk
-                cmd += [bi.HIP_PORTS[j], int(round(h)),
-                        bi.KNEE_PORTS[j], int(round(kk))]
+                cmd += [bi.HIP_PORTS[j], quant(bi.HIP_PORTS[j], h),
+                        bi.KNEE_PORTS[j], quant(bi.KNEE_PORTS[j], kk)]
             link.joints(cmd)
             # the servos take whole degrees, so a correction smaller than the
             # quantum is commanded but never executed -- worth knowing, since the
@@ -299,6 +377,7 @@ def run(a, incumbent, dt):
                 n_quant += 1
 
             T[k], RM[k], PM[k], RI[k], PI[k] = t, roll, pitch, r_in, p_in
+            RS[k], PS[k] = r_raw, p_raw
             DK[k], HIP[k], KNEE[k] = dk, hip_deg, knee_deg
             CX[k], CY[k] = cpg.x, cpg.y
 
@@ -318,16 +397,21 @@ def run(a, incumbent, dt):
     finally:
         wall = time.perf_counter() - t_wall0
         try:
-            link.joints(link.neutral_pose())
+            link.joints(link.neutral_pose(shift_deg=a.shift_home,
+                                      hip_deg=a.hip_offset,
+                                      knee_deg=a.knee_offset))
             time.sleep(0.3)
         finally:
             link.close()
 
     trace = dict(t=T[:k], roll_meas=RM[:k], pitch_meas=PM[:k], roll_in=RI[:k],
-                 pitch_in=PI[:k], dknee=DK[:k], hip_deg=HIP[:k],
+                 pitch_in=PI[:k], roll_src=RS[:k], pitch_src=PS[:k],
+                 dknee=DK[:k], hip_deg=HIP[:k],
                  knee_deg=KNEE[:k], cpg_x=CX[:k], cpg_y=CY[:k], fresh=FRESH[:k])
     stats = dict(wall=wall, ticks=k, n_clipped=n_clipped, n_quant=n_quant,
-                 n_imu_fail=link.n_imu_fail, n_send_fail=link.n_send_fail)
+                 n_held=quant.n_held, n_cmds=quant.n_total,
+                 n_imu_fail=link.n_imu_fail, n_send_fail=link.n_send_fail,
+                 n_imu_stale=link.n_imu_stale, max_imu_stale=link.max_imu_stale)
     return trace, stats, cpg
 
 
@@ -395,6 +479,10 @@ def report(a, trace, stats, cpg, dt):
         print(f"  !! {stats['n_imu_fail']} IMU reads failed (last good value "
               f"reused); {100 * trace['fresh'].mean():.0f}% of ticks had a fresh "
               f"reading")
+    if stats.get("max_imu_stale", 0) > 20:
+        print(f"  !! the IMU repeated the same sample {stats['max_imu_stale']} "
+              f"times in a row: it FROZE during the run, and every reading after "
+              f"that was the last real one. Power-cycle the robot.")
     if stats["n_send_fail"]:
         print(f"  !! {stats['n_send_fail']} serial writes failed")
 
@@ -404,6 +492,12 @@ def report(a, trace, stats, cpg, dt):
         print(f"  correction     |dknee| mean {np.abs(dk).mean():4.2f} deg, max "
               f"{np.abs(dk).max():4.2f} deg, at the +-{cpg.DKNEE_CLIP:.1f} deg "
               f"clip for {100 * sat:.0f}% of ticks")
+        if stats.get("n_cmds"):
+            print(f"  command hysteresis changed "
+                  f"{100 * stats['n_held'] / stats['n_cmds']:.1f}% of the "
+                  f"{stats['n_cmds']} servo writes (only those where plain "
+                  f"rounding would have flipped a degree -- that is the dither "
+                  f"it removed)")
         if stats["n_quant"]:
             print(f"  !! on {100 * stats['n_quant'] / k:.0f}% of ticks the "
                   f"correction was smaller than the servos' 1 deg quantum and "
@@ -457,6 +551,7 @@ def report(a, trace, stats, cpg, dt):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     path = os.path.join(RESULTS_DIR, f"standtest_{a.mode}_{stamp}.npz")
     meta = dict(mode=a.mode, dt=dt, cpg_dt=a.cpg_dt, contacts=a.contacts,
+                imu_lpf=a.imu_lpf, cmd_hys=a.cmd_hys, shift_home=a.shift_home,
                 attitude=not a.no_attitude, attitude_gain=a.attitude_gain,
                 gains=[cpg.kp_roll, cpg.kd_roll, cpg.kp_pitch, cpg.kd_pitch],
                 dknee_clip=cpg.DKNEE_CLIP, roll_sign=a.roll_sign,
@@ -473,6 +568,44 @@ def report(a, trace, stats, cpg, dt):
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--knee-lift", type=float, default=None,
+                    help="[deg] knee rotation during SWING -- how far the foot "
+                         "is picked up (incumbent: 8.5). The knee term is active "
+                         "in swing only, so this is the ground-clearance knob; "
+                         "raise it if the robot drags or scuffs")
+    ap.add_argument("--hip-sweep", type=float, default=None,
+                    help="[deg] hip half-sweep about its offset, i.e. stride "
+                         "length (incumbent: 17.0)")
+    ap.add_argument("--knee-offset", type=float, default=None,
+                    help=f"[deg] stance knee angle (default "
+                         f"{bi.KNEE_OFFSET_DEG:g}). Raising it extends the legs "
+                         f"and lifts the trunk -- the other half of 'it is not "
+                         f"clearing the ground' when a payload squashes the "
+                         f"servos. The park pose follows it")
+    ap.add_argument("--hip-offset", type=float, default=None,
+                    help=f"[deg] stance hip angle (default "
+                         f"{bi.HIP_OFFSET_DEG:g})")
+    ap.add_argument("--stride", type=float, default=None,
+                    help="[s] stretch the gait to this stride period by scaling "
+                         "w_swing and w_stance together (the swing/stance ratio "
+                         "is preserved). The serial link caps the control rate, "
+                         "so a fast stride is commanded as a coarse staircase; "
+                         "this is the knob that buys commands per stride")
+    ap.add_argument("--imu-lpf", type=float, default=0.06,
+                    help="[s] time constant of the low pass on the attitude fed "
+                         "to the knee correction (0 disables). Walking vibration "
+                         "puts several degrees of noise on the IMU and the "
+                         "correction is only ~4 deg wide, so unfiltered it "
+                         "spends its budget chasing noise")
+    ap.add_argument("--cmd-hys", type=float, default=0.25,
+                    help="[deg] hysteresis at the whole-degree rounding "
+                         "boundary, so a target sitting on a .5 does not dither "
+                         "between two degrees every tick (0 disables)")
+    ap.add_argument("--shift-home", type=_opt_float, default=-45.0,
+                    help="[deg] commanded to the mass-shifter servo before the "
+                         "run so the slug lies ALONG the walking direction (the "
+                         "harness rests ~45 deg off-axis). Flip the sign if it "
+                         "ends up across instead; 'none' leaves it untouched")
     ap.add_argument("--mode", choices=["sign", "still", "walk"], default="walk",
                     help="'sign': guided IMU direction check, no gait -- run "
                          "this FIRST, nothing else can establish it. 'still': "
@@ -503,6 +636,7 @@ def main():
                    help="do not sleep to hold --dt (let the serial link set the "
                         "rate, as the experiment does)")
     g.add_argument("--imu-every", type=int, default=1)
+    rx.add_wifi_args(g)
     g.add_argument("--imu-units", choices=["auto", "deg", "rad"], default="auto")
     g.add_argument("--keep-gyro", action="store_true",
                    help="do NOT deactivate the firmware's gyro balancing (it "
@@ -533,17 +667,45 @@ def main():
         return mode_sign(a)
 
     incumbent = rx.load_incumbent(a.incumbent_json)
+    if a.stride is not None:
+        # Rescaling both oscillator frequencies keeps the swing/stance RATIO --
+        # the shape of the gait -- and only stretches it in time, which is the
+        # one knob that buys commands per stride without touching the geometry.
+        now = bi.stride_period(incumbent)
+        f = now / float(a.stride)
+        incumbent = np.asarray(incumbent, float).copy()
+        incumbent[1] *= f
+        incumbent[2] *= f
+        print(f"[gait] stride stretched {now:.3f}s -> {a.stride:g}s "
+              f"(w_swing/w_stance x{f:.2f}); this is a DIFFERENT gait from the "
+              f"simulated incumbent -- save it to results/incumbent.json if it "
+              f"walks")
+    if a.hip_sweep is not None or a.knee_lift is not None:
+        was = bi.travel_degrees(incumbent)
+        incumbent = bi.set_travel(incumbent, hip_deg=a.hip_sweep,
+                                  knee_deg=a.knee_lift)
+        now = bi.travel_degrees(incumbent)
+        print(f"[gait] travel {was[0]:.1f}/{was[1]:.1f} -> {now[0]:.1f}/"
+              f"{now[1]:.1f} deg (hip half-sweep / knee lift); a DIFFERENT gait "
+              f"from the simulated incumbent -- save it to "
+              f"results/incumbent.json if it walks")
     dt = a.dt
     if dt is None:
         link = rx.make_link(a)
         link.connect()
         try:
-            med, worst = link.measure_period(n=a.calib_ticks)
+            med, worst, t_w, t_f = link.amortised_period(
+                imu_every=a.imu_every, n=a.calib_ticks)
         finally:
             link.close()
-        dt = max(0.01, float(np.ceil(med * a.imu_every * 100) / 100))
-        print(f"[timing] measured tick {1000 * med:.1f} ms (worst "
+        # 5 ms grid, not 10: at a ~34 ms tick the coarse grid threw away 16% of
+        # the achievable rate, and the rate is what the gait is starved of.
+        dt = max(0.01, float(np.ceil(med * 200) / 200))
+        print(f"[timing] average tick {1000 * med:.1f} ms (worst "
               f"{1000 * worst:.1f} ms) -> dt = {dt:g} s ({1 / dt:.0f} Hz)")
+        if a.imu_every > 1:
+            print(f"[timing]   write {1000 * t_w:.1f} ms, write+read "
+                  f"{1000 * t_f:.1f} ms, IMU read every {a.imu_every} ticks")
 
     trace, stats, cpg = run(a, incumbent, dt)
     report(a, trace, stats, cpg, dt)
