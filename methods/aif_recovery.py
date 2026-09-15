@@ -3,13 +3,17 @@
 A single active-inference agent that unifies three components under ONE Gaussian
 goal prior over outputs y = [vx, vy, pitch, roll]:
 
-  * a fast MatrixNormal-Wishart AR belief -- the existing
-    ``marxefe_optimizer.MARXAgent`` reused UNMODIFIED -- updated every sim step
-    (100 Hz), with the robot's measured joint angles as the exogenous input (a
-    linear joint-angle -> output map) and past outputs as the autoregressive part;
+  * a fast MatrixNormal-Wishart AR belief -- ``marxefe_optimizer.MARXAgent`` --
+    updated every sim step (100 Hz), with the robot's measured joint angles as the
+    exogenous input (a linear joint-angle -> output map) and past outputs as the
+    autoregressive part;
   * a slow, event-triggered Gaussian-process map from the CPG control parameters
     to the outputs, with a persistent memory, that PROPOSES a recovery gait by
-    minimizing Expected Free Energy under the goal prior;
+    minimizing Expected Free Energy under the goal prior, and that ALSO FEEDS THE
+    AR BELIEF: its prediction at the currently commanded gait enters the regressor
+    as a third, uncertain input block (Dg=4), mean into the regressor and variance
+    into the regressor's second moment. The AR belief therefore predicts with the
+    gait map rather than beside it, and learns online how far to trust it;
   * a prediction-error TRIGGER: the cross-entropy from the MARX one-step posterior
     predictive to the goal prior, accumulated in a CUSUM. When the belief predicts
     outputs far from the goal (speed deficit / tilt), the accumulator crosses a
@@ -21,10 +25,10 @@ against the SAME goal prior, so this is a single free-energy-minimizing controll
 rather than a detector bolted onto an optimizer.
 
 DISTINCT from ``MARXAgent`` (which selects controls by minimizing EFE over the
-MARX model itself and has no GP): here the MARX belief only drives the trigger,
-and a reactive GP over controls selects the gait. The MARX object's own CasADi EFE
-solver is never invoked -- only ``update`` / ``posterior_predictive`` /
-``crossentropy``.
+MARX model itself and has no GP): here the MARX belief drives the trigger, and a
+reactive GP over controls selects the gait. The MARX object's own CasADi EFE
+solver is never invoked -- only ``regressor`` / ``set_exogenous_belief`` /
+``update`` / ``posterior_predictive`` / ``crossentropy``.
 """
 
 import numpy as np
@@ -37,7 +41,8 @@ class UnifiedAIFAgent:
                  target_vx=0.5, goal_std=(0.25, 0.25, np.deg2rad(12), np.deg2rad(12)),
                  trigger_vx_std=1e3, trigger_vy_std=1e3, ar_order=2, forgetting=0.99,
                  n_init=4, pool=512, r_rep=0.04,
-                 warmup_t=2.5, cusum_kappa=3.0, cusum_h=5.0):
+                 warmup_t=2.5, cusum_kappa=3.0, cusum_h=5.0,
+                 gp_in_belief=True, gp_stride=5):
         self.inc = np.asarray(incumbent, float)
         self.lo = np.asarray(box[0], float)
         self.hi = np.asarray(box[1], float)
@@ -68,14 +73,28 @@ class UnifiedAIFAgent:
         tvx = float(trigger_vx_std) if trigger_vx_std is not None else float(control_std[0])
         tvy = float(trigger_vy_std) if trigger_vy_std is not None else float(control_std[1])
         trig_std = (tvx, tvy, control_std[2], control_std[3])
+        # `gp_in_belief` widens the MARX regressor by a Dg=4 uncertain block fed
+        # by the gait map (see module docstring); Dg=0 recovers the earlier agent,
+        # in which the map only ever selected gaits and never informed the belief.
+        self.gp_in_belief = bool(gp_in_belief)
+        self.gp_stride = max(1, int(gp_stride))
         from methods.marxefe_optimizer import build_marx_agent
         self.marx = build_marx_agent(
             target_velocity=float(target_vx),
             goal_prior_std=tuple(trig_std),
-            input_buffer=1, output_buffer=int(ar_order), forgetting=float(forgetting))
+            input_buffer=1, output_buffer=int(ar_order), forgetting=float(forgetting),
+            Dg=4 if self.gp_in_belief else 0)
 
         # GP memory: control (reduced, normalized), observed 4-D output, fell flag
         self.Xn, self.Yout, self.Fell = [], [], []
+        # last fitted maps, published by `propose` (background thread) and read by
+        # `observe` (sim thread). The tuple is swapped atomically and its contents
+        # are never mutated after publication, so no lock is needed.
+        self._gp = None
+        self._gp_theta = None        # gait the cached prediction was taken at
+        self._gp_pred = None         # (mean (4,), var (4,)) at that gait
+        self.gp_mean = np.zeros(4)   # diagnostics: what the belief is being told
+        self.gp_std = np.zeros(4)
 
         # trigger CUSUM state (agent-owned)
         self.warmup_steps = int(round(warmup_t / self.dt))
@@ -103,18 +122,54 @@ class UnifiedAIFAgent:
         full[self.fd] = self.flo + np.clip(xr_norm, 0.0, 1.0) * (self.fhi - self.flo)
         return full
 
+    # ── the gait map as an uncertain input to the AR belief ──────────────────
+    def _refresh_gp_input(self, theta):
+        """Point the MARX belief's uncertain input block at the gait map's
+        prediction for the currently commanded gait `theta` (a full CPG vector).
+
+        A botorch posterior call costs ~0.5 ms per output dimension, so it is not
+        paid at 100 Hz: the prediction is recomputed only when the commanded gait
+        actually moves (it is constant except during a ramp) and then at most
+        every `gp_stride` steps. Silent no-op until the map has been fitted.
+        """
+        gp = self._gp
+        if gp is None or theta is None:
+            return
+        xr = self._norm(theta)
+        if (self._gp_pred is not None and self._gp_theta is not None
+                and np.array_equal(xr, self._gp_theta)):
+            return                                    # gait unchanged: reuse
+        if self._gp_pred is not None and self._n % self.gp_stride:
+            return                                    # mid-ramp: refresh at stride
+        try:
+            mu, sig = self._predict(gp[0], gp[1], xr[None, :])
+        except Exception:
+            return
+        # latent posterior variance only: the map's *epistemic* uncertainty. Its
+        # observation noise is not added, because that is what W already models —
+        # adding it would count the same noise twice.
+        m, v = mu[0], sig[0] ** 2
+        if not (np.all(np.isfinite(m)) and np.all(np.isfinite(v))):
+            return
+        self._gp_theta, self._gp_pred = xr, (m, v)
+        self.gp_mean, self.gp_std = m, np.sqrt(v)
+        self.marx.set_exogenous_belief(m, v)
+
     # ── per-step: update belief + accumulate the cross-entropy trigger ───────
-    def observe(self, y, u):
+    def observe(self, y, u, theta=None):
         """Assimilate one 100 Hz observation. `y`=[vx,vy,pitch,roll],
-        `u`=measured joint angles (Du=8). Updates the MARX belief and the trigger
-        CUSUM on cross-entropy(predictive || goal)."""
+        `u`=measured joint angles (Du=8), `theta`=the CPG parameter vector
+        currently commanded (full 8-D; None leaves the gait-map input untouched).
+        Updates the MARX belief and the trigger CUSUM on
+        cross-entropy(predictive || goal)."""
         y = np.asarray(y, float)
         u = np.asarray(u, float)
+        if self.gp_in_belief:
+            self._refresh_gp_input(theta)
         # one-step predictive cross-entropy to the goal, on the SAME regressor the
         # update will use (backshift is non-mutating), BEFORE assimilating y.
         try:
-            ubuf = self.marx.backshift(self.marx.ubuffer, u)
-            x = np.concatenate([ubuf.flatten(), self.marx.ybuffer.flatten()])
+            x = self.marx.regressor(u_k=u)
             H = float(self.marx.crossentropy(x))
             if not np.isfinite(H):
                 H = self._last_H
@@ -218,6 +273,12 @@ class UnifiedAIFAgent:
         try:
             pool = self._sobol(self.pool)
             models, stats = self._fit_gps()
+            # publish for the belief: `observe` (sim thread) reads this tuple to
+            # feed the uncertain input block. Swapped after fitting completes, so
+            # the sim thread never sees a half-fitted model; the cached prediction
+            # is dropped so the next tick re-queries the new map.
+            self._gp = (models, stats)
+            self._gp_theta = self._gp_pred = None
             mu, sig = self._predict(models, stats, pool)
             noise = np.array([s[2] for s in stats])                 # (4,)
             gvar = self.goal_var                                    # (4,)

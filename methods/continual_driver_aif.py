@@ -142,7 +142,9 @@ def run_event_bout_aif(seed, agent, physics, incumbent, cfg):
             joints = st.joint_angles if st.joint_angles is not None else np.zeros(8)
 
             # ── fast in-loop active-inference update + trigger ───────────────
-            agent.observe([vx, vy, pitch, roll], joints)
+            # `applied` (the ramped gait actually commanded this tick) is handed
+            # over so the belief can read the gait map at the right point.
+            agent.observe([vx, vy, pitch, roll], joints, theta=applied)
             last_y = np.array([vx, vy, pitch, roll])
 
             # ── apply a gait the propose thread has delivered (non-blocking) ─

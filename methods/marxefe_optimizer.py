@@ -60,7 +60,8 @@ class MARXAgent:
                  delay_out=1,
                  time_horizon=1,
                  num_iters=10,
-                 forgetting=1.0):
+                 forgetting=1.0,
+                 Dg=0):
 
         # Exponential forgetting factor λ ∈ (0, 1] applied to the accumulated
         # sufficient statistics on every update. λ = 1 recovers the standard
@@ -69,10 +70,19 @@ class MARXAgent:
         # track non-stationary dynamics (e.g. flat → slope) online.
         self.forgetting = float(forgetting)
         self.Dy = Dy
-        self.Dx = Du * (delay_inp + 1) + Dy * delay_out
+        # Regressor = [exogenous inputs | past outputs | uncertain block]. The
+        # third block (width Dg, 0 = absent) carries an input the agent only knows
+        # as a Gaussian -- here the fixed GP gait map's prediction u_theta. Its
+        # mean enters the regressor and its variance the regressor's SECOND
+        # moment, which is the only change the matrix-normal-Wishart update needs
+        # (see `update` and `set_exogenous_belief`).
+        self.Dg = int(Dg)
+        self.Dx = Du * (delay_inp + 1) + Dy * delay_out + self.Dg
         self.Du = Du
         self.ybuffer = np.zeros((Dy, delay_out))            # past outputs
         self.ubuffer = np.zeros((Du, delay_inp + 1))        # current + past inputs
+        self.g_mean = np.zeros(self.Dg)                     # E[u_theta]
+        self.g_var = np.zeros(self.Dg)                      # diag Cov[u_theta]
         self.delay_inp = delay_inp
         self.delay_out = delay_out
         self.M = coefficients_mean_matrix                   # A prior/posterior mean
@@ -105,6 +115,32 @@ class MARXAgent:
         self._efe_sig = None
         self._efe_u_prev = None
 
+    def regressor(self, u_k=None, ubuffer=None, ybuffer=None):
+        """Assemble the regressor x = [inputs | past outputs | u_theta mean].
+
+        `u_k` shifts a *copy* of the input buffer first (non-mutating), so the
+        caller can score the very regressor the next `update` will use. Pass
+        explicit buffers to build x for a hypothetical state.
+        """
+        ubuf = self.ubuffer if ubuffer is None else ubuffer
+        ybuf = self.ybuffer if ybuffer is None else ybuffer
+        if u_k is not None:
+            ubuf = self.backshift(ubuf, u_k)
+        return np.concatenate([ubuf.flatten(), ybuf.flatten(), self.g_mean])
+
+    def set_exogenous_belief(self, mean, var):
+        """Set the Gaussian belief N(mean, diag(var)) over the uncertain input
+        block (the fixed GP gait map's prediction at the currently commanded
+        gait). Held until the next call, so the 100 Hz loop may refresh it at
+        whatever rate the map actually changes."""
+        if not self.Dg:
+            raise ValueError("agent was built with Dg=0; no uncertain input block")
+        self.g_mean = np.asarray(mean, float).reshape(self.Dg)
+        self.g_var = np.maximum(np.asarray(var, float).reshape(self.Dg), 0.0)
+
+    def _gp_active(self):
+        return self.Dg > 0 and bool(np.any(self.g_var > 0.0))
+
     def set_goal_velocity(self, target_velocity):
         """Switch the forward-velocity target (non-stationary task). Replaces the
         goal-prior mean (same covariance) and invalidates the cached EFE solver,
@@ -131,9 +167,18 @@ class MARXAgent:
         ν0 = λ * self.ν + (1.0 - λ) * self.ν_prior
 
         self.ubuffer = self.backshift(self.ubuffer, u_k)
-        x_k = np.concatenate([self.ubuffer.flatten(), self.ybuffer.flatten()])
+        x_k = self.regressor()
 
+        # Expected sufficient statistics under the Gaussian belief over the
+        # uncertain block: E[x xᵀ] = x̄ x̄ᵀ + Σ_θ and E[x yᵀ] = x̄ yᵀ. Σ_θ is the
+        # GP covariance padded with zeros onto the known blocks, so it only ever
+        # touches the trailing Dg diagonal entries. This is the free-energy-
+        # minimizing matrix-normal-Wishart update (exact marginalization is not
+        # conjugate: it leaves a covariance W⁻¹ + Aᵀ Σ_θ A that depends on A).
         X = np.outer(x_k, x_k)
+        if self.Dg:
+            g = np.arange(self.Dx - self.Dg, self.Dx)
+            X[g, g] += self.g_var
         Ξ = np.outer(x_k, y_k) + np.dot(Λ0, M0)
 
         Λ_new = Λ0 + X
@@ -166,9 +211,16 @@ class MARXAgent:
         """
         if self._const is None:
             inv_O = inv(self.Ω)
+            inv_L = inv(self.Λ)
             self._const = {
                 "M_T":              self.M.T,                       # (Dy, Dx)
-                "inv_Lambda":       inv(self.Λ),                    # (Dx, Dx)
+                "inv_Lambda":       inv_L,                          # (Dx, Dx)
+                # trailing-block quantities for the uncertain input (Dg > 0):
+                # diag(Λ⁻¹) restricted to that block, and the rows of M reading it
+                "diag_inv_Lambda_g": np.diag(inv_L)[self.Dx - self.Dg:].copy()
+                                     if self.Dg else None,
+                "M_g":              np.asarray(self.M[self.Dx - self.Dg:, :], float)
+                                     if self.Dg else None,          # (Dg, Dy)
                 "inv_Omega":        inv_O,                          # (Dy, Dy)
                 "Omega":            np.asarray(self.Ω),             # (Dy, Dy)
                 "eta":              float(self.ν - self.Dy + 1),
@@ -182,14 +234,25 @@ class MARXAgent:
         Uses cached constants — no matrix inversion per call. With
         s = 1 + xᵀΛ⁻¹x: mean = Mᵀx, Psi = (eta/s)·Ω⁻¹, and the predictive
         covariance is the closed form s/(eta-2)·Ω (see `predictions`).
+
+        With an uncertain input block (Dg > 0, non-zero variance) the exact
+        predictive is no longer a T, so its first two moments are matched:
+        s picks up tr(Λ⁻¹Σ_θ) and the covariance an extra M_gᵀ Σ_θ M_g, which is
+        no longer a multiple of Ω — hence the one small (Dy×Dy) inverse on that
+        branch. Psi is the T precision throughout, i.e. Cov = eta/(eta-2)·Psi⁻¹,
+        which is what `crossentropy` and `log_evidence` assume.
         """
         c = self.predictive_constants()
         eta = c["eta"]
         x_t = np.asarray(x_t, dtype=float)
         mu_t = c["M_T"] @ x_t
         scale = 1.0 + float(x_t @ (c["inv_Lambda"] @ x_t))
-        Psi_t = (eta / scale) * c["inv_Omega"]
-        return eta, mu_t, Psi_t
+        if not self._gp_active():
+            return eta, mu_t, (eta / scale) * c["inv_Omega"]
+        gv, M_g = self.g_var, c["M_g"]
+        scale += float(c["diag_inv_Lambda_g"] @ gv)
+        S_t = (scale / (eta - 2.0)) * c["Omega"] + M_g.T @ (gv[:, None] * M_g)
+        return eta, mu_t, (eta / (eta - 2.0)) * inv(S_t)
 
     def predictions(self, controls, time_horizon=None):
         """Roll the posterior predictive forward H steps under `controls`
@@ -214,6 +277,11 @@ class MARXAgent:
         c = self.predictive_constants()
         eta, M_T, inv_L, Omega = c["eta"], c["M_T"], c["inv_Lambda"], c["Omega"]
         cov_factor = 1.0 / (eta - 2.0)
+        gp = self._gp_active()
+        if gp:      # constant over the rollout: the gait is not a decision here
+            gv, M_g = self.g_var, c["M_g"]
+            scale_g = float(c["diag_inv_Lambda_g"] @ gv)
+            S_g = M_g.T @ (gv[:, None] * M_g)
 
         m_y = np.zeros((self.Dy, H))
         S_y = np.zeros((self.Dy, self.Dy, H))
@@ -221,11 +289,14 @@ class MARXAgent:
         ybuf = self.ybuffer.copy()
         for t in range(H):
             ubuf = self.backshift(ubuf, controls[:, t])
-            x_t = np.concatenate([ubuf.flatten(), ybuf.flatten()])
+            x_t = self.regressor(ubuffer=ubuf, ybuffer=ybuf)
             mu_t = M_T @ x_t
             scale = 1.0 + float(x_t @ (inv_L @ x_t))
             m_y[:, t] = mu_t
-            S_y[:, :, t] = (scale * cov_factor) * Omega
+            if gp:
+                S_y[:, :, t] = ((scale + scale_g) * cov_factor) * Omega + S_g
+            else:
+                S_y[:, :, t] = (scale * cov_factor) * Omega
             ybuf = self.backshift(ybuf, mu_t)
         return m_y, S_y
 
@@ -248,7 +319,7 @@ class MARXAgent:
         for t in range(self.thorizon):
             u_t = controls[t * self.Du:(t + 1) * self.Du]
             ubuffer = self.backshift(ubuffer, u_t)
-            x_t = np.concatenate([ubuffer.flatten(), ybuffer.flatten()])
+            x_t = self.regressor(ubuffer=ubuffer, ybuffer=ybuffer)
 
             J += self.mutualinfo(x_t) + self.crossentropy(x_t) + np.dot(u_t - self.μ, np.dot(self.Υ, u_t - self.μ)) / 2.0
 
@@ -276,6 +347,14 @@ class MARXAgent:
         controller (goal-mean deviation + control prior) — the ablation baseline
         that isolates what the active-inference machinery contributes.
         """
+        if self.Dg:
+            # The graph below builds x_t from the input/output buffers alone. An
+            # uncertain input block would have to enter it as a further parameter
+            # (and its Σ_θ terms as extra scale contributions); the agent that
+            # calls this optimizes joint angles and carries no gait map, so the
+            # combination is simply refused rather than silently mis-sized.
+            raise NotImplementedError(
+                "minimizeEFE does not support the uncertain input block (Dg>0)")
         Du, Dy, thorizon, Dx = self.Du, self.Dy, self.thorizon, self.Dx
         Wu = self.ubuffer.shape[1]      # delay_inp + 1
         Wy = self.ybuffer.shape[1]      # delay_out
@@ -1120,11 +1199,12 @@ def build_marx_agent(target_velocity=1.0, control_prior_scale=0.15,
                                      np.deg2rad(45), np.deg2rad(45)),
                      input_buffer=3, output_buffer=10, time_horizon=2,
                      nu0=20.0, omega0_scale=1.0, lambda0_scale=1e-3,
-                     forgetting=1.0):
+                     forgetting=1.0, Dg=0):
     """Construct a MARX-EFE agent (Du=8, Dy=4) with the given buffers / horizon /
-    priors. Shared by the per-trial optimizer and the continuous online runner."""
+    priors. Shared by the per-trial optimizer and the continuous online runner.
+    `Dg` widens the regressor by an uncertain input block (the GP gait map)."""
     Mu, My, Dy, Du = int(input_buffer) - 1, int(output_buffer), 4, 8
-    reg_dim = Dy * My + Du * (Mu + 1)
+    reg_dim = Dy * My + Du * (Mu + 1) + int(Dg)
     Omega0  = omega0_scale * np.diag(np.ones(Dy))
     Lambda0 = lambda0_scale * np.diag(np.ones(reg_dim))
     Mean0   = 1e-8 * rnd.randn(reg_dim, Dy)
@@ -1137,7 +1217,8 @@ def build_marx_agent(target_velocity=1.0, control_prior_scale=0.15,
     return MARXAgent(Mean0.copy(), Lambda0.copy(), Omega0.copy(), float(nu0),
                      mu_t.numpy().copy(), Upsilon0.copy(), goal,
                      Dy=Dy, Du=Du, delay_inp=Mu, delay_out=My,
-                     time_horizon=int(time_horizon), forgetting=forgetting)
+                     time_horizon=int(time_horizon), forgetting=forgetting,
+                     Dg=int(Dg))
 
 
 def _velocity_window_J(vx, vy, torques, qdot, fwd_dist, robot_mass,
