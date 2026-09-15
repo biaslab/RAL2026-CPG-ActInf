@@ -21,6 +21,7 @@
 % Packages
 \usepackage{graphicx}   % bitmapped and pdf graphics
 \graphicspath{{figures/}}
+%\usepackage{epstopdf}  % not needed: pdflatex reads .pdf directly (no repstopdf here)
 \usepackage{mathptmx}   % assumes new font selection scheme installed
 \usepackage{times}      % assumes new font selection scheme installed
 \usepackage{amsmath}
@@ -30,6 +31,12 @@
 \let\endproof\relax
 \usepackage{amsthm}
 \newtheorem{proposition}{Proposition}
+
+% Revision marking: \rev{...} for prose, {\color{revcolor} ...} inside display
+% math. Set \revcolorON to 0 (or redefine \rev as identity) to print in black.
+\usepackage{xcolor}
+\definecolor{revcolor}{RGB}{0,90,180}
+\newcommand{\rev}[1]{\textcolor{revcolor}{#1}}
 
 % To draw the platform schematic, load tikz and
 % \input{problem/laikago_schematic.tex}:
@@ -59,12 +66,10 @@ Active inference for event-triggered gait adaptation\\ in quadrupedal robot loco
 %Event-triggered adaptation of central pattern generators for quadrupedal locomotion
 }
 
-\author{Alex Pitoiset$^{1}$, Ajith Anil Meera$^{1}$ and Wouter M. Kouw$^{1}$% <-this % stops a space
-\thanks{*This work was supported by the Eindhoven Artificial Intelligence Systems Institute and NGF AiNed XS Europe grant.}% <-this % stops a space
-\thanks{$^{1}$Department of Electrical Engineering,
-        Eindhoven University of Technology, Netherlands
-        {\tt\small w.m.kouw@tue.nl}}%
-}
+%\author{Alex Pitoiset$^{1}$, Ajith Anil Meera$^{1}$ and Wouter M. Kouw$^{1}$% <-this % stops a space
+%\thanks{*This work was supported by the Eindhoven Artificial Intelligence Systems Institute and NGF AiNed XS Europe grant.}% <-this % stops a space
+%\thanks{$^{1}$Department of Electrical Engineering, Eindhoven University of Technology, Netherlands {\tt\small w.m.kouw@tue.nl}}%
+%}
 
 \begin{document}
 
@@ -74,216 +79,251 @@ Active inference for event-triggered gait adaptation\\ in quadrupedal robot loco
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{abstract}
-Central pattern generators (CPG) produce signals for coordinated leg motion, allowing legged robots to walk robustly. Its parameters are tuned to the robot body and to the environment in which it operates. Whenever an event occurs that alters the robot's dynamics, the CPG parameters may not be optimal again. Under suboptimal parameters, the robot may become unstable and eventually fall. To prevent this, we propose an agent that triggers a parameter updating phase when an uncertainty-weighted prediction error crosses a threshold. In this phase, the agent will propose candidate sets based on a fast form of Bayesian optimization and restore optimality before it falls. We perform both simulated and real hardware experiments with sudden payload shifts, comparing the proposed active inference agent with state-of-the-art baselines in terms of time to reach a target. 
+Central pattern generators with attitude controllers produce signals that coordinate leg motion, allowing legged robots to walk robustly. Its parameters are tuned to the robot body and to the environment in which it operates. Whenever an event occurs that alters the robot's dynamics, the generator parameters may not be optimal again. Under suboptimal parameters, the robot may become unstable and eventually fall. To prevent this, we propose an agent that triggers a parameter updating phase when an uncertainty-weighted prediction error crosses a threshold. The threshold is not tuned, but derived from a false positive rate. In the triggered phase, the agent will propose candidate sets that it believes will restore predictions of level forward motion and restore optimality before it falls. Planning and action is performed by expected free energy minimization. We perform simulated experiments with sudden payload shifts, comparing the proposed active inference agent with state-of-the-art baselines in terms of travel distance. 
 \end{abstract}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{INTRODUCTION}
 \label{sec:introduction}
 
-Legged machines are increasingly asked to work through long, uninterrupted bouts, across which conditions seldom hold still: the ground changes underfoot, a carried load shifts, an actuator wears down.
-Each such event can turn a stably walking controller into one that stumbles, so the ability to keep going through it separates a laboratory demonstration from a deployable machine.
-Animals display this adaptability effortlessly, and engineers have long pursued it by replicating their morphologies \cite{pettersen2017snake, dwivedula2025configbot}, yet the controllers rarely inherit the biological advantage: Boston Dynamics' Spot relies on centralized, sensor-intensive control that is effective but complex and costly \cite{dwivedula2025configbot}.
+Legged machines are increasingly asked to work for long uninterrupted bouts in non-stationary conditions. Events such as payload shifts and actuator damage can lead to stumbling and falling.
+Animals adapt to such events effortlessly and engineers have long pursued it by replicating their morphologies \cite{pettersen2017snake, dwivedula2025configbot}. Yet current leg controllers still fall far short. For example, Boston Dynamics' Spot relies on centralized, sensor-intensive control that is effective but complex and costly \cite{dwivedula2025configbot}.
 Central pattern generators (CPGs) offer a simpler alternative.
 In vertebrates, these spinal circuits generate the periodic signals of movements such as walking, freeing higher centers to modulate speed and gait through simple inputs \cite{goulding2009circuits, dickinson2000how}, and their decentralized architecture lowers command latency and bandwidth \cite{ijspeert2008special}.
 The price is that the rhythm is shaped by only a handful of parameters, held fixed during walking, so a setting that is stable under one condition need not be stable under another.
 When an event changes the condition mid-bout, staying upright requires re-tuning those parameters online.
 
-Among CPG models, coupled nonlinear oscillators are biologically plausible and computationally efficient \cite{collins1994hard, ijspeert2008special}: mutual inhibition synchronizes the joints into coordinated gaits \cite{collins1994hard, sprowitz2008passive, righetti2008pattern}, and their limit cycles recover quickly from perturbations \cite{sprowitz2008passive}.
-An open-loop CPG walks stably on flat ground, but a change in condition induces body rotations that the rhythm alone cannot correct, so feedback has to close the loop: contact feedback resynchronizes the oscillators to the actual footfalls \cite{righetti2008pattern}, and posture feedback corrects the trunk attitude.
-Virtual model control (VMC) computes joint actions as if virtual springs and dampers were attached to the body \cite{pratt2001virtual}, and Ajallooeian et al.\ use such springs to pull the trunk level, traversing terrain that defeats an open-loop CPG \cite{ajallooeian2013central}.
-We adopt this attitude VMC as a reactive posture layer (Section~\ref{sec:vmc}).
+Coupled nonlinear oscillators are biologically plausible and computationally efficient \cite{collins1994hard, ijspeert2008special}: mutual inhibition synchronizes the joints into coordinated gaits \cite{collins1994hard, sprowitz2008passive, righetti2008pattern}, and their limit cycles recover quickly from perturbations \cite{sprowitz2008passive}.
+An open-loop CPG walks stably on flat ground, but a change in condition induces body rotations the rhythm alone cannot correct, so feedback must close the loop: contact feedback resynchronizes the oscillators to the actual footfalls \cite{righetti2008pattern}, and posture feedback corrects the trunk attitude.
+Virtual model control (VMC) computes joint actions as if springs and dampers were attached to the body \cite{pratt2001virtual}; such springs pull the trunk level over terrain that defeats an open-loop CPG \cite{ajallooeian2013central}, and we adopt this attitude VMC as a reactive posture layer (Section~\ref{sec:vmc}).
 
-Reactive feedback leaves the parameters untouched, whereas a large or persistent change requires adapting them.
-Cully et al.\ let a damaged robot search a precomputed behavioral repertoire by trial and error, recovering within roughly a dozen physical trials \cite{cully2015robots}, while Kumar et al.\ infer a latent encoding of the condition from recent proprioception and adjust a learned policy within a fraction of a second \cite{kumar2021rma}.
-Each incurs a cost we avoid: trial and error executes every candidate on the already-compromised robot, and the learned policy needs extensive training and is opaque.
-A complementary line tunes gait parameters as online black-box optimization, fitting a Gaussian process surrogate to the parameter-score pairs seen so far and proposing the next window's parameters, with a trust region keeping proposals from jumping to destabilizing gaits \cite{eriksson2019scalable}, but it too can only score a candidate by walking on it.
+Reactive feedback leaves the parameters untouched; a large or persistent change requires adapting them.
+A damaged robot can search a precomputed behavioral repertoire by trial and error, recovering within a dozen physical trials \cite{cully2015robots}, while rapid motor adaptation infers a latent encoding of the condition from recent proprioception and adjusts a learned policy in a fraction of a second \cite{kumar2021rma}.
+Each incurs a cost we avoid: trial and error executes every candidate on the compromised robot, and the learned policy needs extensive training.
+A complementary line tunes gait parameters as online black-box optimization, fitting a Gaussian process surrogate to the parameter-score pairs seen so far and keeping proposals inside a trust region \cite{eriksson2019scalable}, but it too can only score a candidate by walking on it.
+
+Deciding \emph{when} to act is a control problem in its own right.
+Event-triggered control replaces a fixed update rate with a condition that fires once a monitored signal leaves a tolerance band, so effort is spent when the plant departs from expectation rather than on a schedule; paired with a Gaussian process, whose posterior variance reports where a model is still trustworthy, it has served remotely controlled vehicles for which every update is costly \cite{jang2025event}.
+We inherit that structure but not its scarce resource: here physical trials are the constraint, not bandwidth, so the trigger gates a re-tuning whose cost would otherwise be paid in falls.
+
+Both decisions follow from a single principle.
+Active inference casts perception and control as inference under one generative model, with preferred outcomes as a prior over observations and actions chosen by minimizing expected free energy (EFE) \cite{friston2015active, dacosta2020active}.
+That objective splits into a cross-entropy to the goal prior and an information gain \cite{koudahl2021on, kouw2023information}, so exploration follows from the agent's own uncertainty rather than a separately tuned acquisition rule, and the prior that scores a candidate gait also reports when the current one has drifted.
 
 We contribute a prediction-error trigger that decides \emph{when} to re-tune the CPG, and a unified active inference agent that decides \emph{what} to re-tune to.
-By screening candidates against a memory of failed gaits, the agent avoids the destabilizing on-robot trials that grid search, Bayesian optimization and extremum-seeking control require.
-An ablation attributes the reduction in falls to that screening rather than to the unified objective, which matches it while removing the need for a separately tuned detector.
+Screening candidates against a memory of failed gaits, it avoids the destabilizing on-robot trials that grid search, Bayesian optimization and extremum-seeking control require.
+Under a persistent payload shift it accrues roughly a quarter of their falls and detects each shift sooner.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{PROBLEM STATEMENT}
 \label{sec:problem}
 
-Let $ \xi = (p, \Psi, v, \omega)$ represent the position $p \in \mathbb{R}^3$, orientation $\Psi \in SO(3)$, linear velocity $v = \dot{p}$ and angular velocity $\omega$ of the trunk of a quadrupedal robot in a world frame.
-The orientation is parameterized by roll, pitch and yaw $(\psi_r, \psi_p, \psi_y)$. Each base motion corresponds to a configuration of the twelve joints, their rates, and the torques that realize it,
-\begin{align}
-  (\varphi, \dot{\varphi}, \tau) = f(\xi) \,,
-  \label{eq:base-to-joints}
-\end{align}
-where $\varphi$ are the joint angles, $\dot{\varphi}$ their rates and $\tau$ the torques.
-The map $f$ is unknown, since it depends on the full rigid-body dynamics, the terrain and the switching foot-ground contact, none of which is available in closed form.
-
-Locomotion is then the problem of finding torques that drive the base toward a desired behavior, namely holding a target forward velocity $v^\star$ with roll and pitch near zero,
-\begin{align}
-  \tau^\star = \arg\min_{\tau} \; \big\lVert v - v^\star \big\rVert + \big\lVert (\psi_r, \psi_p) \big\rVert \,.
-  \label{eq:locomotion-objective}
-\end{align}
-Because $f$ is unknown, these torques cannot be solved for directly.
-Instead, a CPG produces rhythmic joint-angle references, an attitude controller adjusts them to counter posture deviations, and joint-level position controllers track the result through torques.
-We introduce both controllers next.
+Let $\xi = (\alpha, \dot{\alpha}, p, \dot{p})$ represent the orientation $\alpha \in SO(3)$, angular velocity $\dot{\alpha}$, position $p \in \mathbb{R}^3$, and linear velocity $\dot{p}$ of the trunk of a quadrupedal robot in a world frame.
+The orientation $\alpha$ consists of roll $\alpha_r$, pitch $\alpha_p$ and yaw $\alpha_y$, and the position of a forward, a lateral and a vertical component $(p_x, p_y, p_z)$. 
+Furthermore, let $\varphi$ be the robot's joint angles, $\dot{\varphi}$ the change in joint angles and $\tau$ the torques. Each foot $i$ additionally reports a binary contact state $c_i \in \{0,1\}$.
+The map from ($\varphi, \dot{\varphi}, \tau$) to $\xi$ is unknown as it depends on the full rigid-body dynamics, the terrain and the switching foot-ground contact, none of which is available in closed form.
+%
+Locomotion is then the problem of finding torques that drive the base toward a desired state, such as a target forward velocity with roll and pitch near zero. 
 
 \subsection{Central pattern generator}
 \label{sec:cpg}
 
-The CPG is a network of four mutually coupled Hopf oscillators, one per limb, coordinated by inhibitory coupling through a gait-specific matrix $K = [k_{ij}]$.
-Each oscillator balances a stance and a swing frequency through
-\begin{equation}
-	\omega_i = \omega_{\text{stance}} \varsigma(-b y_i)  + \omega_{\text{swing}} \varsigma(b y_i) \,, \label{eq:omega_i}
-\end{equation}
-with $\varsigma(\cdot)$ a sigmoid that interpolates between the two frequencies by the sign and magnitude of the phase $y_i$, its sharpness set by $b$.
-The oscillator state evolves as
+A CPG is a dynamical system that converges to a limit cycle, absorbing disturbances such as missteps due to uneven terrain.
+%
+We consider a CPG based on a network of four coupled Hopf oscillators \cite{rutishauser2008passive}.  For $i = 1, \dots, 4$, we define a Cartesian coordinate that evolves according to
 \begin{align}
-  \dot{x}_i &= \alpha\,(u - r_i^2)\,x_i - \omega_i\,y_i \,, \label{eq:xdot} \\
-  \dot{y}_i &= \beta\,(u - r_i^2)\,y_i + \omega_i\,x_i
-               + \gamma \sum_{j=1}^4 k_{ij}\,y_j + s_i \,, \label{eq:ydot}
+  \dot{z}_{1i} &= \beta_1 \big(\upsilon - (z_{1i}^2 + z_{2i}^2) \big) z_{1i} - \omega_i z_{2i} \, , \label{eq:xdot} \\
+  \dot{z}_{2i} &= \beta_2 \big(\upsilon - (z_{1i}^2 + z_{2i}^2) \big) z_{2i} + \omega_i z_{1i}
+               + \gamma \sum_{j=1}^4 k_{ij} z_{2j} + s_i \, , \label{eq:ydot}
 \end{align}
-where $r_i = \sqrt{x_i^2 + y_i^2}$ is the instantaneous amplitude, $u$ the squared limit-cycle amplitude, and $\alpha, \beta > 0$ are convergence rates.
-The coupling gain $\gamma$ strengthens inter-limb coordination and reduces the dependence on initial conditions.
+where the $\beta$ are positive constants that control the convergence rate to the oscillator's limit cycle and $\upsilon$ is the squared limit-cycle amplitude.
+Each Hopf oscillator has a stance and a swing phase that it balances through the parameter $\omega_i$;
+\begin{equation}
+	\omega_i = \omega_{\text{stance}} \varsigma(-b z_{2i})  + \omega_{\text{swing}} \varsigma(b z_{2i}) \, . \label{eq:omega_i}
+\end{equation}
+$\varsigma(\cdot)$ interpolates between the two frequencies based on the sign and magnitude of $z_{2i}$, with $b$ sharpening the balance.
+%
+The $k_{ij} \in \{-1,0,1\}$ indicate inhibitory or excitatory coupling between legs $i$ and $j$. The overall coupling gain $\gamma$ has been shown to reduce the dependence on initial conditions \cite{rutishauser2008passive}. 
 
-The term $s_i$ closes a feedback loop on foot-contact timing \cite{righetti2008pattern}.
-Leg $i$ is classified as swinging above a small positive threshold on $y_i$ and as in stance below a small negative one, with a hysteresis band between in which $s_i = 0$.
-Comparing this phase against the binary contact state of foot $i$ yields
+The CPG incorporates a sensory feedback loop through $s_i$ in Eq. \ref{eq:ydot} \cite{righetti2008pattern}. Leg $i$ is classified as \emph{swinging} (i.e., no contact) when it exceeds a small positive threshold $\bar{z}$ and as \emph{standing} (i.e., with contact) when it is below a small negative one $\underline{z}$, with a hysteresis band in between;
 \begin{align}
-  s_i =
-  \begin{cases}
-    K_{\text{stop}} \big( \omega_i x_i - \gamma \sum_{j} k_{ij} y_j \big) & \text{contact matches phase} \\
-    F_{\text{fast}} \operatorname{sign}(y_i) & \text{otherwise}
-  \end{cases}
+		\rho_i := \begin{cases}
+		0 & |z_{2i}| > \bar{z} \\
+		1 & |z_{2i}| < \underline{z} \\
+		\rho_i^{-} & \text{otherwise}
+	\end{cases}
+  \label{eq:phase-classify}
+\end{align}
+where $\rho_i^{-}$ is the previous classification, so that the description latches the phase and prevents rapid switching. Resynchronization of the swing versus stance phase is triggered by a mismatch between the oscillator's phase $\rho_i$ and the measured foot contact $c_i$:
+\begin{align}
+s_i = \begin{cases} 
+		\lambda \big( \omega_i z_{1i} - \gamma \textstyle\sum_{j} k_{ij} z_{2j} \big) & \text{if}\  c_i = \rho_i \\
+	 	\eta \operatorname{sign}(z_{2i}) & \text{if}\ c_i \neq \rho_i \, . 
+	\end{cases}
   \label{eq:feedback}
 \end{align}
-The phase matches when the foot is airborne in swing or loaded in stance, and is contradicted by an early touchdown or a lost contact.
-The gains $K_{\text{stop}}$ and $F_{\text{fast}}$ set how strongly the sensed footfalls resynchronize the rhythm to the actual contacts.
+We refer to $\lambda$ as the phase match parameter and $\eta$ the phase mismatch. During phase match, $\lambda$ rescales the oscillator's own constants to $(1+\lambda)\,\omega_i$ and $(1-\lambda)\,\gamma$. During phase mismatch, $z_{2i}$ is driven away from zero, i.e., the leg holds its current swing or stance until it reaches a match again.
 
-The oscillator states map to joint-angle references,
+The oscillator states ($z_1,z_2$) map to the joint angles $\varphi$ through
 \begin{align}
-  \varphi^{\text{hip}}_i &=  \varphi^{\text{hip}}_0  +  A_{\text{hip}}\, x_i \,, \label{eq:joint-map-hip} \\
-  \varphi^{\text{knee}}_i &= \varphi^{\text{knee}}_0  -  A_{\text{knee}} \max( 0, y_i)  +  \Delta_i \,,
+  \varphi^{\text{hip}}_i &=  \varphi^{\text{hip}}_0  +  A_{\text{hip}}\, z_{1i} \,, \label{eq:joint-map-hip} \\
+  \varphi^{\text{knee}}_i &= \varphi^{\text{knee}}_0  -  A_{\text{knee}} \max( 0, z_{2i})  +  \Delta_i \,,
   \label{eq:joint-map}
 \end{align}
-with standing-pose offsets $\varphi^{\text{hip}}_0, \varphi^{\text{knee}}_0$ and swing amplitudes $A_{\text{hip}}, A_{\text{knee}}$.
-During swing ($y_i > 0$) the knee flexes to lift the foot while the hip advances with $x_i$, and during stance the knee holds its nominal extension.
-The term $\Delta_i$ is the posture correction of Section~\ref{sec:vmc}, zero for the open-loop CPG.
-Joint-level position controllers track these references, producing the torques $\tau$ of Eq.~\ref{eq:base-to-joints}.
-
-The behavior of the CPG is governed by a small parameter vector,
+with $\varphi^{\text{hip}}_0$, $\varphi^{\text{knee}}_0$ the angle origins and $A_{\text{hip}}$, $A_{\text{knee}}$ the swing amplitudes.
+During swing ($z_{2i} > 0$) the knee flexes to lift the foot while the hip advances with $z_{1i}$, and during stance the knee holds its nominal extension.
+The term $\Delta_i$ is the posture correction of Section~\ref{sec:vmc}.
+%Joint-level position controllers track these references, producing the torques $\tau$ that realize the motion.
+%
+Overall, CPG parameters are collected into the vector
 \begin{align}
-    \theta = [\gamma, \omega_{\text{swing}}, \omega_{\text{stance}}, F_{\text{fast}}, K_{\text{stop}}, A_{\text{hip}}, A_{\text{knee}}, b] \,,
+    \theta = [\gamma, \omega_{\text{swing}}, \omega_{\text{stance}}, \eta, \lambda, A_{\text{hip}}, A_{\text{knee}}, b] \, .
     \label{eq:cpg-parameters}
 \end{align}
-collecting the coupling gain, the stance and swing frequencies, the contact-feedback gains, the hip and knee amplitudes, and the sigmoid sharpness.
-These set the shape of the gait and are held fixed during locomotion.
 
 \subsection{Attitude virtual model control}
 \label{sec:vmc}
 
-The contact feedback of Eq.~\ref{eq:feedback} synchronizes the rhythm to the footfalls, but nothing so far senses the trunk attitude, and roll and pitch deviations are precisely what drive the robot toward a fall (Eq.~\ref{eq:locomotion-objective}).
-Virtual model control imagines virtual springs and dampers attached to the robot and computes the joint actions they would produce \cite{pratt2001virtual}.
-Ajallooeian et al.\ \cite{ajallooeian2013central} span such springs between a trunk-fixed plane and a horizontal reference, so that the virtual forces at the stance feet continually pull the trunk level.
+\begin{figure}[tb]
+	\centering
+	\includegraphics[width=.45\textwidth]{problem-payload3.png}
+	\caption{Schematic of quadruped robot with base state $\xi$ being perturbed by leg motion. Events such as payload shifts alter which parameters are optimal. Arrows at feet indicate compensation by virtual attitude controller.}
+	\label{fig:problem-payload}
+\end{figure}
 
-We adopt a kinematic form suited to position-controlled joints, in which a virtual spring-damper on each attitude angle acts as a proportional-derivative law,
+The CPG naturally absorbs disturbances and returns to its limit cycle, but there is no explicit mechanism to ensure the robot base maintains level.
+We impose an attitude proportional-derivative (PD) controller to match the hip positions to a level reference plane, similar to a set of mass-spring-dampers on a car \cite{pratt2001virtual,ajallooeian2013central}.
+%
+For roll and pitch,we define:
 \begin{align}
-  c_r &= -\big( \kappa^{r}_{p}\, \psi_r + \kappa^{r}_{d}\, \dot{\psi}_r \big) \,, \label{eq:vmc-roll} \\
-  c_p &= -\big( \kappa^{p}_{p}\, (\psi_p - \bar{\psi}_p) + \kappa^{p}_{d}\, \dot{\psi}_p \big) \,, \label{eq:vmc-pitch}
+  c_r &= -\big( \kappa^{r}_{p}\, \alpha_r + \kappa^{r}_{d}\, \dot{\alpha}_r \big) \,, \label{eq:vmc-roll} \\
+  c_p &= -\big( \kappa^{p}_{p}\, (\alpha_p - \bar{\alpha}_p) + \kappa^{p}_{d}\, \dot{\alpha}_p \big) \,, \label{eq:vmc-pitch}
 \end{align}
 with stiffness and damping gains $\kappa$.
-Roll is regulated toward zero, since straight walking involves no sustained bank and lateral tip-over is the dominant fall mode.
-Pitch is regulated toward a slowly adapting baseline $\bar{\psi}_p$, an exponential moving average of recent pitch with a time constant of about $1$\,s, so that transient rocking is damped while the sustained pitch of an incline is tolerated rather than fought.
-The commands distribute over the legs as the knee corrections of Eq.~\ref{eq:joint-map},
+Roll is regulated towards zero to combat transient rocking. Pitch is regulated towards a slowly adapting baseline $\bar{\alpha}_p$, an exponential moving average over recent pitch values, so the sustained pitch of an incline is tolerated rather than fought.
+The commands distribute over the legs as:
 \begin{align}
-  \Delta_i = \operatorname{clip}\big( \sigma^{F}_i\, c_p + \sigma^{L}_i\, c_r ,\; \pm \delta_{\max} \big) \,,
+\Delta_1 &= \operatorname{clip}\big( \phantom{-}\ c_p + c_r ,\, \pm \, \delta_{\max} \big) \\
+\Delta_2 &= \operatorname{clip}\big( \phantom{-}\ c_p - c_r ,\, \pm \, \delta_{\max} \big) \\
+\Delta_3 &= \operatorname{clip}\big( -c_p + c_r ,\, \pm \, \delta_{\max} \big) \\
+\Delta_4 &= \operatorname{clip}\big( -c_p - c_r ,\, \pm \, \delta_{\max} \big) \, ,
   \label{eq:vmc-distribution}
 \end{align}
-with $\sigma^{F}_i = \pm 1$ for front and hind legs, $\sigma^{L}_i = \pm 1$ for left and right legs, and $\delta_{\max}$ bounding the correction.
-Since a knee angle sets the effective leg length, the legs on a sinking side of the trunk extend to push that corner up while those on the rising side shorten, realizing the virtual springs of Ajallooeian et al.\ through the position-controlled knees.
+where the index runs over front left, front right, back left and back right, and $\delta_{\max}$ bounds the correction.
+%A positive roll $\alpha_r$ banks the trunk to the right and a positive pitch $\alpha_p$ raises the front, so the sign on $c_p$ is positive for the front pair and the sign on $c_r$ is positive for the left pair.
+The knee angle sets the effective leg length, so the legs on a sinking side of the trunk extend to push that corner up while those on the rising side shorten.
 
-The gains $\kappa$ are fixed, hand-tuned, and not part of $\theta$.
-The attitude loop therefore acts within a stride, correcting momentary deviations but leaving the rhythm itself untouched.
-Ajallooeian et al.\ \cite{ajallooeian2013central} moreover observe that these corrections lose effectiveness on harder terrain, where they begin to work against the CPG's forward progression.
-Whether locomotion stays stable thus still hinges on $\theta$ matching the operating condition, which we examine next.
+%The gains $\kappa$ are fixed, hand-tuned, and not part of $\theta$.
+%The attitude loop therefore acts within a stride, correcting momentary deviations but leaving the rhythm itself untouched.
+%These corrections moreover lose effectiveness on harder terrain, where they begin to work against the CPG's forward progression \cite{ajallooeian2013central}.
+%Whether locomotion stays stable thus still hinges on $\theta$ matching the operating condition, which we examine next.
 
 \subsection{Shifts in parameter optimality}
 \label{sec:optimality-shift}
 
-Let $e$ denote the \emph{operating condition}: the combined state of environment and body that the gait must accommodate.
-It covers extrinsic factors such as terrain incline, friction and micro-geometry, together with intrinsic ones such as the mass distribution of the trunk and the torque capacity of each actuator.
-Running the controller with parameters $\theta$ under condition $e$, with the attitude feedback of Section~\ref{sec:vmc} active, induces a distribution $p(\xi \given \theta, e)$ over the base state, which we score by the locomotion objective of Eq.~\ref{eq:locomotion-objective},
+Let $e$ denote the \emph{operating condition} of the robot in the world.
+It covers extrinsic factors such as terrain incline and friction, together with intrinsic ones such as the center of mass of the base.
+Running the controller with parameters $\theta$ under condition $e$, with the attitude feedback of Section~\ref{sec:vmc} active, induces a distribution $p(\xi \given \theta, e)$ over the base state. Our desired state is expressed as a goal distribution over $\xi$, parameterized as a Gaussian distribution:
+\begin{align} \label{eq:goal-prior}
+	p(\xi \given \xi^{\star}, \Sigma^{\star}) = \mathcal{N}(\xi \given \xi^{\star}, \Sigma^{\star}) \, ,
+\end{align}
+where $\xi^{\star}$ represents the target and $\Sigma^{\star}$ indicates permissible deviation around that target. 
+Our locomotion objective is then written as a cross-entropy between the induced distribution and the goal distribution:
 \begin{align}
-    V(\theta, e) = - \mathbb{E}_{p(\xi \given \theta, e)} \Big[ \frac{1}{v^\star} \big\lVert v - v^\star \big\rVert + \frac{1}{\psi_0} \big\lVert (\psi_r, \psi_p) \big\rVert \Big] \,,
+    J(\theta, e) =  \mathbb{E}_{p(\xi \given \theta, e)} \Big[ -\ln p(\xi \given \xi^{\star}, \Sigma^{\star}) \Big] \, ,
     \label{eq:criterion}
 \end{align}
-setting $V = -c_f$ on a fall.
-The scale $\psi_0$ lets the attitude term dominate, encoding uprightness as the primary requirement.
 In practice the expectation is a time average over an evaluation window on low-pass-filtered angles, so that the rhythmic rocking of the gait is not penalized.
-The best gait for condition $e$ is the condition-conditioned optimum
+We can now define a set of CPG parameters that is optimal with respect to an operating condition $e$:
 \begin{align}
-    \theta^{\star}(e) = \underset{\theta}{\arg\max}\; V(\theta, e) \,.
+    \theta^{\star}(e) = \underset{\theta}{\arg \min}\; J(\theta, e) \,.
     \label{eq:terrain-optimum}
 \end{align}
 
-Crucially, $\theta^{\star}(e)$ is not constant.
-Optimizing Eq.~\ref{eq:criterion} under differing terrain, load or actuator torque yields distinct parameter vectors, each most stable under the condition it was tuned for, so a change in condition relocates the optimum,
-\begin{align}
-    \theta^{\star}(e_{\text{old}}) \neq \theta^{\star}(e_{\text{new}}) \,,
-    \label{eq:optimality-shift}
-\end{align}
-a \emph{shift in parameter optimality}.
-Such shifts arise externally, as when the robot steps onto a new surface, and intrinsically, as when it picks up a payload or an actuator loses torque, and they may drift slowly or jump at a discrete \emph{event}.
-The experiments of Section~\ref{sec:experiments} study one abrupt, intrinsic event, a shifting payload, that relocates the optimum too sharply for the reactive posture loop alone to absorb.
+Crucially, $\theta^{\star}(e)$ is a function of the environment and the robot's body.
+Optimizing Eq.~\ref{eq:criterion} under differing terrain, load or actuator torque yields distinct parameter vectors, each most stable for its tuned condition. Thus, a change in condition relocates the optimum, $ \theta^{\star}(e_{\text{old}}) \neq \theta^{\star}(e_{\text{new}})$.
+Examples of such changes include the robot stepping onto a new surface, a payload that slides off or an actuator that short-circuits (Figure \ref{fig:problem-payload}).
 
 Because $\theta$ is held fixed, a shift leaves the controller suboptimal and the attitude deviations compound: as the trunk tilts, recovery soon demands more than the bounded feedback of Eq.~\ref{eq:vmc-distribution} can supply, and locomotion fails.
-Resuming stable walking therefore requires two decisions, \emph{when} the optimum has moved and \emph{what} to re-tune $\theta$ toward, made online and quickly enough to preserve balance.
-The next section addresses both with a single active inference agent, in which one goal prior encoding the objective of Eq.~\ref{eq:locomotion-objective} both detects the shift and selects the new gait.
+Resuming stable walking therefore requires two decisions, \emph{when} the optimum has moved and \emph{what} to re-tune $\theta$ toward. This has to be done quickly enough to prevent instabilities from increasing.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{METHODS}
-\label{sec:methods}
 
-\subsection{Unified active inference agent}
-\label{sec:agent}
+\section{Active inference agent} \label{sec:agent}
 
-The controller is a single active inference agent organized around one Gaussian \emph{goal prior} over the body outputs $\mathbf{y}_k = (v_x, v_y, \phi, \rho)_k$, the forward and lateral trunk velocity, the pitch and the roll.
-The prior is $\bar{p}(\mathbf{y}) = \cN(\mathbf{y}^{\star}, \Sigma^{\star})$ with $\mathbf{y}^{\star} = (v^{\star}, 0, 0, 0)$: walk forward at the target speed, level and straight.
-Two probabilistic models share this prior.
+The active inference agent consists of a probabilistic generative model that predicts observations, updates a probability distribution over parameters after each observation, and plans actions to reach a target based on expected free energy minimization \cite{kouw2023information}. The agent makes a noisy observation $\mathbf{y}_k$ of the robot state $\xi_k$ at time $k$, and acts by modulating the CPG parameter vector $\theta$. While the agent is event-driven, the CPG is always running and generates joint angle setpoints which are turned to servo torques by a PD controller (see Figure \ref{fig:system-org}).
 
-\emph{A dynamics belief.}
-A multivariate autoregressive model with exogenous input (MARX) predicts the outputs from their recent past and from the measured joint angles $\mathbf{q}_k$,
+\begin{figure}[tb]
+	\centering
+	\includegraphics[width=.35\textwidth]{figures/system-org2.png}
+	\caption{Overview of information flow: the agent observes base state and generates CPG parameters, which are turned into oscillator states and joint angle setpoints. These are picked up by a PD controller and turned into torques. Torques are based to the servomotors and the robot changes base state. The PD controller operates fastest, then the CPG and lastly the agent.}
+	\label{fig:system-org}
+\end{figure}
+
+\subsection{Probabilistic model and belief updating}
+We propose a probabilistic model based on multivariate autoregression with exogenous input (MARX). Let $\bar{\mathbf{y}}_k = [\mathbf{y}_{k-1}, \dots \mathbf{y}_{k-m_y}]$ be the recent history of base states, of dimension $D_y$ each, and let the joint angles $\varphi_k$ be incorporated as an exogenous signal.
+A second exogenous channel carries what the agent has learned about the gait itself. A set of Gaussian process regression models maps the CPG parameters $\theta$ to each of the base state dimensions, fitted to a data set $\{(\theta_j, \mathbf{y}_j)\}_{j=1}^N$ of the gaits tried and the outputs they produced. As such, it constitutes a memory that will prevent a repeated use of $\theta$'s that lead to a fall. The models are fitted separately and then held fixed, so at any tick of the clock their stacked prediction is a Gaussian distributed random variable,
+\begin{align} \label{eq:gp-input}
+    p(\mathbf{u}_{\theta}) = \cN\big(\mathbf{u}_{\theta} \given g(\theta), S(\theta)\big) \, ,
+\end{align}
+collecting the posterior means in $g(\theta)$ and the posterior variances in the diagonal $S(\theta)$. Stacking the three channels into a regressor $\mathbf{x}_k = [\bar{\mathbf{y}}_k^\top,\, \varphi_k^\top,\, \mathbf{u}_{\theta}^\top]^\top$, the evolution of $\mathbf{y}_k$ is described as a Gaussian distribution over autoregressive coefficients $A$ and process noise precision $W$:
 \begin{align} \label{eq:marx}
-    \mathbf{y}_k = \textstyle\sum_{i=1}^{p} A_i\, \mathbf{y}_{k-i} + B\, \mathbf{q}_k + \mathbf{e}_k \,,
+    p(\mathbf{y}_k \given \mathbf{x}_k, A, W) = \cN\big(\mathbf{y}_k \given A^\top \mathbf{x}_k, W^{-1}\big) \, .
 \end{align}
-the exogenous term $B\mathbf{q}_k$ being a linear proprioceptive map from joint configuration to body motion.
-A matrix-normal-Wishart posterior over the coefficients $(A_{1:p}, B)$ and the noise precision is updated in closed form at every control step of $100$\,Hz \cite{meera2026curvature}, giving a Gaussian one-step posterior predictive $\cN(\mu_k, \Sigma_k)$.
+The gait map thus enters as an input carrying its own uncertainty rather than as a known mean offset, and the block of $A$ that reads it is estimated online, so the agent may discount the map where it disagrees with what the body is currently doing.
 
-\emph{A control map.}
-A Gaussian process maps the CPG parameters $\theta$ to the outcome outputs, fitted to a persistent memory $\{(\theta_j, \mathbf{y}_j)\}$ of the gaits tried and the outputs they produced, a fall being recorded as its degraded output.
-Only the high-leverage subset of the parameters of Eq.~\ref{eq:cpg-parameters} is searched, the rest held at the incumbent.
-The memory persists across recurrences, so the map fills in as the condition repeats and no gait has to be supplied in advance.
+Conjugacy is what makes this affordable at every control step, and it survives the substitution. We place a matrix-normal-Wishart prior on the pair \cite{nisslbeck2025factor},
+\begin{align} \label{eq:mnw-prior}
+    p(A, W) = \mathcal{MN}\big(A \given M_{k-1}, \Lambda_{k-1}^{-1}, W^{-1}\big)\,\mathcal{W}\big(W \given \Omega_{k-1}^{-1}, \nu_{k-1}\big) ,
+\end{align}
+with $\Lambda$ a precision over the rows of $A$ and $(\Omega, \nu)$ a scatter matrix and degrees of freedom for $W$.
 
-When adaptation is triggered (Section~\ref{sec:trigger}), the agent proposes the gait that minimizes the Expected Free Energy of its predicted output under the goal prior,
+\begin{proposition} \label{prop:mnw}
+Let $\mathbf{u}_{\theta}$ be distributed as in Eq.~\ref{eq:gp-input}, independently of $(A, W)$, and write $\bar{\mathbf{x}}_k = [\bar{\mathbf{y}}_k^\top, \varphi_k^\top, g(\theta)^\top]^\top$ for the mean regressor and $\Sigma_{\theta}$ for $S(\theta)$ padded with zeros onto the remaining blocks. Then the matrix-normal-Wishart distribution minimizing variational free energy after observing $\mathbf{y}_k$ has parameters
+\begin{align} \label{eq:mnw-update}
+    \Lambda_k &= \Lambda_{k-1} + \bar{\mathbf{x}}_k \bar{\mathbf{x}}_k^\top + \Sigma_{\theta} \, , \nonumber \\
+    M_k &= \Lambda_k^{-1}\big(\Lambda_{k-1} M_{k-1} + \bar{\mathbf{x}}_k \mathbf{y}_k^\top \big) \, , \nonumber \\
+    \Omega_k &= \Omega_{k-1} + \mathbf{y}_k \mathbf{y}_k^\top + M_{k-1}^\top \Lambda_{k-1} M_{k-1} - M_k^\top \Lambda_k M_k \, , \nonumber \\
+    \nu_k &= \nu_{k-1} + 1 \, .
+\end{align}
+\end{proposition}
+
+\emph{Proof:} Marginalizing $\mathbf{u}_{\theta}$ out of Eq.~\ref{eq:marx} is not conjugate, since it leaves a covariance $W^{-1} + A^\top \Sigma_{\theta} A$ that depends on $A$. We therefore minimize free energy over a factorization $q(A,W)\,q(\mathbf{u}_{\theta})$ in which $q(\mathbf{u}_{\theta})$ is clamped to Eq.~\ref{eq:gp-input}, the Gaussian processes being fixed. The log of Eq.~\ref{eq:marx} is linear in the statistics $\mathbf{x}_k\mathbf{x}_k^\top$, $\mathbf{x}_k \mathbf{y}_k^\top$ and $\mathbf{y}_k\mathbf{y}_k^\top$, so the optimal $q(A,W)$ is the conjugate update evaluated at their expectations, $\E[\mathbf{x}_k\mathbf{x}_k^\top] = \bar{\mathbf{x}}_k \bar{\mathbf{x}}_k^\top + \Sigma_{\theta}$ and $\E[\mathbf{x}_k\mathbf{y}_k^\top] = \bar{\mathbf{x}}_k \mathbf{y}_k^\top$. Substituting these into the exponent of Eq.~\ref{eq:mnw-prior} times Eq.~\ref{eq:marx} and completing the square in $A$ yields Eq.~\ref{eq:mnw-update}. \hfill$\blacksquare$
+
+Eq.~\ref{eq:mnw-update} is the known-input update with a single alteration: the Gaussian process covariance is added to the second moment of the regressor. It acts as a ridge on the block of $A$ that reads the gait map, so a prediction the map is unsure of is attenuated rather than trusted, and the variance it consequently fails to explain accumulates in $\Omega_k$ as process noise.
+
+Marginalizing $A$ and $W$, and matching moments over $\mathbf{u}_{\theta}$, produces a multivariate location-scale T-distributed posterior predictive distribution:
+\begin{align} \label{eq:predictive}
+	p(\mathbf{y}_k \given \bar{\mathbf{y}}_k, \varphi_k, \theta) = \mathcal{T}_{\nu_k - D_y + 1} \big(\mathbf{y}_k \given \mu_k(\theta), \Sigma_k(\theta)\big) \, ,
+\end{align}
+with a mean and a scale matrix
+\begin{align} \label{eq:predictive-moments}
+    \mu_k(\theta) &= M_k^\top \bar{\mathbf{x}}_k \, , \nonumber \\
+    \Sigma_k(\theta) &= \frac{1 + \bar{\mathbf{x}}_k^\top \Lambda_k^{-1} \bar{\mathbf{x}}_k + \tr\big(\Lambda_k^{-1}\Sigma_{\theta}\big)}{\nu_k - D_y - 1}\,\Omega_k + M_k^\top \Sigma_{\theta} M_k \, .
+\end{align}
+Both moments are functions of the candidate gait. The mean carries the memory of which $\theta$'s fell, while a $\theta$ the map has not seen inflates the scale through the two terms in $\Sigma_{\theta}$, so the epistemic value that drives exploration below is inherited from the Gaussian process posterior rather than supplied by a separate acquisition rule.
+
+\subsection{Planning and inferring action}
+When adaptation is triggered (Section~\ref{sec:trigger}), the agent calculates the Expected Free Energy of its predicted output under the goal prior \cite{kouw2023information},
 \begin{align} \label{eq:EFE}
-    G(\theta) &= \underbrace{\tfrac{1}{2}(\mu_\theta - \mathbf{y}^{\star})^{\!\top} \Sigma^{\star-1}(\mu_\theta - \mathbf{y}^{\star}) + \tfrac{1}{2}\tr\!\big(\Sigma^{\star-1}\Sigma_\theta\big)}_{\text{goal seeking (cross-entropy to goal)}} \nonumber \\
-    & \qquad - \underbrace{\tfrac{1}{2}\ln\!\big|I + \Sigma_\theta \Sigma_n^{-1}\big|}_{\text{information gain}} \,,
+    G(\theta) &= \underbrace{\tfrac{1}{2}\big(\xi^{\star} - \mu_k(\theta)\big)^{\!\top} \Sigma^{\star-1} \big(\xi^{\star} - \mu_k(\theta)\big) + \tfrac{1}{2}\tr\!\big(\Sigma^{\star-1}\Sigma_k(\theta)\big)}_{\text{goal-seeking}} \nonumber \\
+    & \qquad - \underbrace{\tfrac{1}{2}\ln\!\big|I + \Sigma_k(\theta) \Sigma^{\star-1}\big|}_{\text{information-seeking}} \,,
 \end{align}
-where $(\mu_\theta, \Sigma_\theta)$ is the Gaussian process posterior predictive of the output at $\theta$ and $\Sigma_n$ the observation noise.
-It proposes $\hat{\theta} = \arg\min_\theta G(\theta)$ over a quasi-random pool of candidates.
-Safety is not a separate constraint but a consequence of the goal prior: a gait that the memory associates with falling predicts outputs far from $\mathbf{y}^{\star}$, inflating the goal-seeking term, so it is avoided while the agent still explores gaits it has not yet ruled out.
-The performance of any gait is scored as the log-likelihood of its observed output under $\bar{p}$.
-Because each candidate is screened against the map before it is committed to, the agent recovers a gait without the destabilizing on-robot trials that a black-box optimizer needs in order to score a candidate, the property that Section~\ref{sec:experiments} turns on.
+The goal-seeking term seeks to match the mean and variance of the predictive distribution to the goal distribution. The information gain term favours elements of $\theta$ for which the predictive variance is larger than the goal variance as those represent epistemic uncertainty to be reduced. The agent will select the action that minimizes EFE:
+\begin{align}
+	\hat{\theta} =  \underset{\theta}{\arg \min}\  G(\theta)
+\end{align}
+Safety is not a separate constraint but a consequence of the goal prior. A gait that the memory associates with falling predicts outputs far from $\xi^{\star}$, which inflates the goal-seeking term and is avoided while the agent is still exploring.
 
-The two models are coupled rather than stacked.
-They share one goal prior: the dynamics belief drives the trigger on the attitude marginal of that prior (Section~\ref{sec:trigger}), while the control map proposes the gait under the full prior, so sensing, triggering and control minimize one free energy.
-
-\subsection{Prediction-error triggering}
+\subsection{Triggering events based on prediction error}
 \label{sec:trigger}
 
 Re-tuning $\theta$ at every step is wasteful and, as Section~\ref{sec:experiments} shows, actively destabilizing, so the agent adapts only when its own predictions leave the goal.
 The perturbations it must survive threaten the \emph{uprightness} of the trunk rather than its speed: a shift that a slower gait can absorb is tolerable, whereas a tilting trunk is not.
-The trigger therefore reads the attitude marginal of the goal prior, namely the cross-entropy of the one-step predicted pitch and roll $(\mu_k^{\rho}, \Sigma_k^{\rho})$ to their level target,
+The trigger therefore reads the attitude marginal of the goal prior of Eq.~\ref{eq:goal-prior}, namely the cross-entropy of the one-step predicted pitch and roll $(\mu_k^{\alpha}, \Sigma_k^{\alpha})$ to their level target $\alpha^{\star} = 0$,
 \begin{align} \label{eq:trigger-err}
-    \epsilon_k &= H\big(\cN(\mu_k^{\rho}, \Sigma_k^{\rho})\,\|\,\bar{p}^{\rho}\big) \\
-    &= \tfrac{1}{2}\mu_k^{\rho\top}\Sigma^{\star-1}_{\rho}\mu_k^{\rho} + \tfrac{1}{2}\tr \big(\Sigma^{\star-1}_{\rho}\Sigma_k^{\rho}\big) + c \,, \nonumber
+    \epsilon_k &= H\big(\cN(\mu_k^{\alpha}, \Sigma_k^{\alpha})\,\|\,p(\alpha \given \alpha^{\star}, \Sigma^{\star}_{\alpha})\big) \\
+    &= \tfrac{1}{2}\mu_k^{\alpha\top}\Sigma^{\star-1}_{\alpha}\mu_k^{\alpha} + \tfrac{1}{2}\tr \big(\Sigma^{\star-1}_{\alpha}\Sigma_k^{\alpha}\big) + c \,, \nonumber
 \end{align}
 the same cross-entropy-to-goal that Eq.~\ref{eq:EFE} minimizes, restricted to the attitude subspace and evaluated on the belief rather than on a candidate gait.
 It is small while the trunk is predicted level and grows when a perturbation drives it to tilt, requiring no model of the perturbation and no signal of when it occurs.
@@ -302,8 +342,8 @@ The agent thus stops adapting when it has restored balance, rather than chasing 
 The forward-velocity preference is not discarded, since it stays in the control objective of Eq.~\ref{eq:EFE}, which keeps seeking speed among the gaits that hold the trunk level.
 Sensing and control therefore read one goal prior in two ways: its attitude marginal decides \emph{when} to act, and the full prior decides \emph{what} to do.
 
-\subsection{Setting the threshold from the cost of adapting}
-\label{sec:threshold}
+%\subsection{Setting the threshold from the cost of adapting}
+%\label{sec:threshold}
 
 The bound $h$ in Eq.~\ref{eq:trigger-cusum} need not be tuned, because the accumulator carries units.
 Since $\epsilon_k$ is a cross-entropy in nats, $s\,S_k$ is the free energy forgone, in nats, by holding the incumbent gait since the excursion began, so $h$ is a \emph{price} rather than a sensitivity.
@@ -324,24 +364,26 @@ At the operating point of Section~\ref{sec:exp-payload}, $h=5$ prices a switch a
 The realized move is large because the search explores, not because correction demands it, and pricing instead the correction that the belief itself deems necessary, through its control gain, is left to future work.
 
 Calibration in the experiments below therefore rests on the slack $\kappa$, the only quantity still set by hand.
-Over the $150$\,s of settled nominal walking the standardized excess never exceeds $2.7$, so at $\kappa = 3$ every increment is negative, the accumulator cannot leave zero, and no false alarm is possible whatever $h$ is.
+Over the $150$\,s of settled nominal walking the standardized excess peaks at $2.69$, so at $\kappa = 3$ every increment of Eq.~\ref{eq:trigger-cusum} is negative; the accumulator is pinned at zero by induction and no false alarm is possible on that sample, whatever $h$ is.
 The bound $h$ then only imposes a short persistence requirement once a perturbation lifts the excess past the slack.
-What the slack buys can be stated precisely.
+Beyond the observed support the guarantee weakens from certainty to an exponential rate, and $h$ is what sets it.
 
 \begin{proposition} \label{prop:fpr}
-Write $e_k = (\epsilon_k - \bar{\epsilon})/s$ and $T = \inf\{k : S_k > h\}$ for the firing time.
-Conditional on the warm-up estimates $(\bar{\epsilon}, s)$, the recursion of Eq.~\ref{eq:trigger-cusum} satisfies:
-\emph{(i)} if $e_k \leq \kappa$ for every $k \leq n$, then $S_k = 0$ for every $k \leq n$ and $T > n$, for any bound $h > 0$;
-\emph{(ii)} if the increments $e_k - \kappa$ are independent and identically distributed with negative mean, and some $\theta^{\star} > 0$ solves $\E\big[e^{\theta^{\star}(e_k - \kappa)}\big] = 1$, then the trigger fires during an unperturbed run of unbounded length with probability at most
+Write $e_k = (\epsilon_k - \bar{\epsilon})/s$ for the standardized excess and $T = \inf\{k : S_k > h\}$ for the firing time.
+Suppose, conditional on the warm-up estimates $(\bar{\epsilon}, s)$, that the increments $e_k - \kappa$ are independent and identically distributed with negative mean, and that some $\theta^{\star} > 0$ solves $\E\big[e^{\theta^{\star}(e_k - \kappa)}\big] = 1$.
+Then an unperturbed run of unbounded length fires with probability at most
 \begin{align} \label{eq:lundberg}
-    \Pr(T < \infty) \leq e^{-\theta^{\star} h} \,.
+    \Pr(T < \infty) \leq e^{-\theta^{\star} h} \,,
 \end{align}
+so a false-alarm budget $a$ is met by any $h \geq \ln(1/a)/\theta^{\star}$.
 \end{proposition}
 
-Part \emph{(i)} follows by induction on Eq.~\ref{eq:trigger-cusum}, and part \emph{(ii)} from the Lindley representation $S_n = \max_{0 \leq j \leq n}(W_n - W_j)$ of the accumulator, with $W_n = \sum_{k \leq n}(e_k - \kappa)$, combined with optional stopping applied to the exponential martingale $\exp(\theta^{\star} W_n)$.
-Part \emph{(i)} governs the experiments, since the observed excess peaks at $2.69$ over the $150$\,s baseline, below $\kappa=3$.
-Part \emph{(ii)} covers excursions beyond the observed support: for Gaussian $e_k$ one has $\theta^\star = 2(\kappa-\mu)/\sigma^2$, giving $e^{-2\kappa h} = 9\times10^{-14}$ at the standardized values.
-This is optimistic, since $\epsilon_k$ is strongly autocorrelated at $100$\,Hz, with a lag-one correlation of $0.92$ and a long-run variance $8.9$ times the marginal one; substituting the long-run variance instead gives $\theta^\star \approx 2.7$ and a still-serviceable bound below $10^{-6}$.
+The proof is given in the Appendix.
+The threshold is thus fixed twice over, and not by a sensitivity dial: Eq.~\ref{eq:threshold} prices it against the cost of switching, and Eq.~\ref{eq:lundberg} prices it against the false alarms one is willing to tolerate.
+The two agree at the operating point of Section~\ref{sec:exp-payload}.
+For Gaussian $e_k$ one has $\theta^{\star} = 2(\kappa - \mu)/\sigma^2$, giving $e^{-2\kappa h} = 9\times10^{-14}$ at the standardized values.
+That is optimistic, since $\epsilon_k$ is strongly autocorrelated at $100$\,Hz, with a lag-one correlation of $0.92$ and a long-run variance $8.9$ times the marginal one; substituting the long-run variance for the one-step generating function gives $\theta^{\star} \approx 2.7$ instead.
+A budget of $a = 10^{-6}$ then demands $h \geq 5.1$, within a few percent of the $h = 5$ that the switching price sets independently.
 The transient following a recovery reaches several hundred standard deviations and is kept from firing by the arming logic of Section~\ref{sec:trigger} rather than by $\kappa$.
 
 No matching guarantee is claimed against missed detections.
@@ -356,7 +398,9 @@ We evaluate the unified active inference agent on the Laikago quadruped in PyBul
 The agent runs with the attitude controller of Section~\ref{sec:vmc} active and adapts only the high-leverage subset of the parameter vector $\theta$ of Eq.~\ref{eq:cpg-parameters}, within fixed bounds throughout, while adaptation is gated by the prediction-error trigger of Section~\ref{sec:trigger}.
 Holding the incumbent gait $\theta^{\star}(\text{flat})$ without adapting is the reference against which the agent is measured.
 Control runs at $\Delta t = 0.01$\,s with a target forward velocity of $0.5$\,m/s.
-Each perturbation event is scored by the criterion of Eq.~\ref{eq:criterion} over a hold window with the ramp-in excluded, and gait switches are ramped in over $0.3$\,s so that the gait never jumps.
+Each perturbation event is scored by the criterion of Eq.~\ref{eq:criterion} over a $10$\,s hold window with the ramp-in excluded, and gait switches are ramped in over $0.3$\,s so that the gait never jumps.
+We report that criterion on the attitude marginal of the goal prior and the forward-speed term separately, as distance covered.
+The two are reported apart because no gait in the searched subset advances under this payload, the clairvoyant oracle included: with the speed term folded in, the criterion is nine parts speed deficit and ranks the oracle last, which measures the perturbation rather than the adaptation.
 
 Adaptation runs asynchronously with the simulation, as it would on hardware.
 The controller steps the physics at $100$\,Hz on one thread while each gait proposal, the Expected Free Energy minimization of Eq.~\ref{eq:EFE} with its Gaussian process fit included, is computed concurrently off the control loop.
@@ -366,14 +410,14 @@ Each bout being paced to real time, a slower optimizer is charged honestly, thro
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{payload_cumulative_falls.pdf}
-\caption{Cumulative falls over a $300$\,s continual bout under the persistent payload shift (mean over one hundred seeds). Holding the incumbent gait accrues falls throughout. The three arms that must trial a candidate on the loaded robot (grid search, Bayesian optimization, extremum seeking) find a tolerant gait early but pay for the search first. The two arms that screen candidates against a memory of past falls, our agent and the safe Gaussian process ablation, fall far less and are indistinguishable from each other, which locates the benefit in the screening rather than in the unified objective.}
+\caption{Cumulative falls over a $300$\,s continual bout under the persistent payload shift (mean over one hundred seeds). Holding the incumbent gait accrues falls throughout. The three arms that must trial a candidate on the loaded robot (grid search, Bayesian optimization, extremum seeking) find a tolerant gait early but pay for the search first. Our agent, which screens each candidate against a memory of past falls before committing to it, falls far less.}
 \label{fig:payload-falls}
 \end{figure}
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.92\textwidth]{payload_method_comparison.pdf}
-\caption{Per-method outcome under the payload shift (mean over one hundred $300$\,s bouts): falls per bout, root-mean-square trunk tilt, and distance traveled while the payload is displaced. The adapting arms survive at a tilt comparable to the fixed gait but cover less ground, and the clairvoyant oracle is the most retrograde of all, which shows that the backward drift is a property of the gait parameterization rather than of the search.}
+\caption{Per-method outcome under the payload shift (mean over one hundred $300$\,s bouts): falls per bout, the criterion of Eq.~\ref{eq:criterion} on its attitude marginal, and distance traveled while the payload is displaced. Bars in the middle panel rise from $-1.29$\,nats, the value a trunk held exactly at the goal would score, so bar length is the cross-entropy in excess of that floor and shorter is better. The criterion separates the arms without counting a single fall, charging instead the tilting that precedes one. The adapting arms nonetheless cover less ground than the fixed gait, and the clairvoyant oracle is the most retrograde of all, which shows that the backward drift is a property of the gait parameterization rather than of the search.}
 \label{fig:payload-comparison}
 \end{figure*}
 
@@ -396,14 +440,13 @@ The bout is non-episodic and runs for $300$\,s: whenever the robot falls it is s
 A controller that never adapts therefore meets the same perturbation over and over, whereas one that finds a tolerant gait simply holds it and walks on, so an agent that remembers earlier outcomes should stop repeating the parameter choices that fell.
 
 At each detected shift the agent proposes a gait by minimizing the Expected Free Energy of Eq.~\ref{eq:EFE} over its control map, favoring parameters whose predicted outputs lie near the goal while avoiding the regions its memory associates with falling.
-It searches only the high-leverage subset $\{\gamma, \omega_{\text{swing}}, F_{\text{fast}}, K_{\text{stop}}, b\}$ of Eq.~\ref{eq:cpg-parameters}, and the memory persists across recurrences within the trial, so the map fills in as the shift repeats.
+It searches only the high-leverage subset $\{\gamma, \omega_{\text{swing}}, \rev{\eta}, \rev{\lambda}, b\}$ of Eq.~\ref{eq:cpg-parameters}, and the memory persists across recurrences within the trial, so the map fills in as the shift repeats.
 Adaptation is triggered by the cross-entropy criterion of Section~\ref{sec:trigger}: the MARX dynamics belief, updated online from the trunk outputs and the measured joint angles, drives the CUSUM once its one-step prediction departs the goal, and re-arms once the robot has recovered after each recenter.
 
-Five further arms, each searching that same subset so that the comparison is head to head, place the agent among the alternatives.
+Four further arms, each searching that same subset so that the comparison is head to head, place the agent among the alternatives.
 Three are online optimizers that can judge a candidate gait only by running it: Latin-hypercube sampling (grid search), online Bayesian optimization, and extremum-seeking control, the classical model-free tuner, which dithers each parameter at a distinct frequency and demodulates the event score into a gradient estimate \cite{killingsworth2006extremum}.
 Extremum seeking is the sharpest form of the difficulty, since even its exploratory dither must be executed on the already-loaded robot.
-The fourth is an ablation that isolates the active inference machinery from safety-filtered search: a Gaussian process agent that screens candidates against the same memory of past falls, but driven by a hand-tuned prediction-error trigger rather than by the attitude marginal of the goal prior, and carrying no MARX belief of the body's dynamics.
-The fifth is a clairvoyant oracle that jumps straight to a pre-fit tolerant gait, an upper anchor on any parameter switch.
+The fourth is a clairvoyant oracle that jumps straight to a pre-fit tolerant gait, an upper anchor on any parameter switch.
 
 Because a tolerant gait, once found, simply keeps walking, we run one hundred $300$\,s bouts per method and report the \emph{cumulative} falls that each accrues over a bout rather than a per-event rate (Fig.~\ref{fig:payload-falls}).
 Holding the incumbent, the robot falls $5.18 \pm 0.18$ times per bout (mean $\pm$ s.e.m.), never adapting and tipping over on $85\%$ of recurrences.
@@ -413,11 +456,8 @@ They fall more because each can assess a candidate only by executing it on the a
 Extremum seeking is worst of the three, significantly worse than both grid search ($p \approx 6 \times 10^{-9}$) and Bayesian optimization ($p \approx 3 \times 10^{-6}$), even though its proposal is the cheapest to compute: its dither is by construction a perturbation applied to the loaded robot, so the exploration it needs in order to estimate a gradient is paid for in falls.
 A clairvoyant oracle never falls, confirming that a recoverable gait exists within the searched subset.
 
-The ablation qualifies what the active inference machinery contributes.
-The safety-filtered Gaussian process agent, without the unified trigger and without the MARX belief, falls $0.48 \pm 0.08$ times per bout, statistically indistinguishable from our agent's $0.41 \pm 0.08$ ($p = 0.5$), and its fall accrual tracks ours closely throughout the bout (Fig.~\ref{fig:payload-falls}).
-What separates the two groups is therefore whether a candidate is screened against a memory of past falls before it is walked on, not whether the trigger and the controller are read off a single goal prior.
-The unified formulation should accordingly be read as an architectural simplification, one objective serving both roles at no cost in falls, rather than as the source of the improvement.
-Where it does show a measurable edge is in promptness: the goal-prior trigger detects the shift in $0.93$\,s on average against $1.26$ to $1.38$\,s for the prediction-error monitors driving the other arms, with no false alarms in any arm.
+Triggering and proposing are both prompt enough to run online.
+The goal-prior trigger detects the shift in $0.93$\,s on average, against $1.26$ to $1.38$\,s for the prediction-error monitors driving the other arms, with no false alarms in any arm.
 Under the asynchronous protocol the gait proposal costs a median of one control step, since a tolerant gait is usually found before any Gaussian process fit is needed, rising to $1.74$\,s in the tail once the map is being fit.
 
 The agent also stops re-tuning once a tolerant gait is in place, adapting exactly once per shift event across all one hundred bouts, so it does not chatter (Fig.~\ref{fig:payload-trigger}).
@@ -425,6 +465,11 @@ Two measurements qualify what produces that restraint.
 The attitude prediction-error does not return to its healthy baseline: it settles about $17\%$ above the pre-shift level, and comes within $10\%$ of baseline in only $5\%$ of bouts, since a load held off-center is never quite free.
 The accumulator does re-cross its threshold later in most bouts, and no second adaptation follows because the monitor latches for the remainder of the event.
 The restraint is therefore a property of the event logic rather than evidence that the residual mismatch has vanished, and whether re-tuning on that residual would help is untested.
+
+Scored by the criterion itself, much the same ordering appears without a fall ever being counted (Fig.~\ref{fig:payload-comparison}).
+Our agent reaches $-1.11 \pm 0.03$\,nats against $-0.93 \pm 0.01$ for the fixed gait, the three optimizers falling between at $-0.98$ (grid search), $-0.99$ (Bayesian optimization) and $-1.02$ (extremum seeking), and the oracle at $-1.27$, against a floor of $-1.29$ for a trunk held exactly level.
+The margin over each optimizer is significant (Mann-Whitney on per-seed means, $p < 10^{-11}$), whereas the three do not order among themselves as their fall counts do: extremum seeking scores best of them here while falling most, the criterion charging the tilt that precedes a fall rather than the fall itself.
+What the criterion adds is therefore corroboration from the prediction-error side, that the arms which fall less are also the ones held closer to the goal throughout.
 
 At this offset the tolerant gaits are more compromised than the fall counts alone convey (Fig.~\ref{fig:payload-comparison}).
 Every adapting arm settles into a gait that walks slowly \emph{backward} under the load, at $-0.12$\,m/s for our agent and $-0.14$\,m/s for the three optimizers, against a $0.5$\,m/s forward target.
@@ -441,10 +486,8 @@ The second is where the danger lies, since grid search, Bayesian optimization an
 Extremum seeking makes the point most sharply, its dither being a deliberate perturbation of the loaded robot that costs more falls than the two search methods it is cheaper than.
 Our agent instead screens each candidate against a learned map with an explicit memory of past falls, and it does so even though the CPG is already stabilized by the attitude controller, so the benefit is complementary to the reactive posture loop rather than a substitute for it.
 
-The ablation narrows the claim.
-A safety-filtered Gaussian process agent, given the same fall memory but neither the unified goal-prior trigger nor the dynamics belief, matches our agent's fall rate, so it is the screening that pays, not the unified objective.
-We therefore read the unified formulation as an architectural economy, one goal prior specifying both when to act and what to do, removing a separately tuned detector at no cost in falls and detecting the shift somewhat sooner, rather than as a performance result.
-Whether that economy earns more where a detector's threshold is harder to hand-tune remains untested.
+The unified formulation is, besides, an architectural economy: one goal prior specifies both when to act and what to do, so the trigger needs no separately tuned detector, and reading uprightness off that prior detects the shift sooner than the hand-tuned monitors driving the other arms.
+We report this as a simplification rather than as a performance result, since these experiments do not separate how much of the reduction in falls is owed to the unified objective and how much to the memory screening alone.
 
 Several limitations qualify these conclusions.
 The evaluation is in simulation, over a single intrinsic perturbation and a modest number of recurrences, and the reference optima are computed offline.
@@ -460,7 +503,7 @@ Validating on hardware, and across a wider range of perturbations, are natural n
 We augmented a CPG of coupled Hopf oscillators with an attitude virtual model controller and studied when and how to re-tune its gait parameters online as the operating condition changes.
 A prediction-error trigger decides when to adapt from a sustained loss of performance, and a unified active inference agent decides what to change by selecting parameters from a learned model of the body's response, with a persistent memory of past falls, rather than by physically trialing candidates.
 On a shifting trunk payload, the agent learns within a single bout to stop selecting the gaits that fall, recovering without the destabilizing trials that grid search, Bayesian optimization and extremum seeking require.
-An ablation attributes that gain to the memory-screened selection rather than to the unified objective, which matches it on falls while dispensing with a separately tuned detector.
+A single goal prior serves both decisions, so no separately tuned detector is required.
 How far this recovery generalizes, and how much the gait parameterization itself caps it, remain open.
 
 %\addtolength{\textheight}{-3cm}  % This command serves to balance the column lengths
@@ -469,6 +512,23 @@ How far this recovery generalizes, and how much the gait parameterization itself
                                   % This command does not take effect until the next page
                                   % so it should come on the page before the last. Make
                                   % sure that you do not shorten the textheight too much.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\appendix[Proof of Proposition~\ref{prop:fpr}]
+\label{appx:fpr}
+
+Let $X_k = e_k - \kappa$, so that Eq.~\ref{eq:trigger-cusum} reads $S_k = \max(0, S_{k-1} + X_k)$ from $S_0 = 0$, and let $R_n = X_1 + \dots + X_n$ sum the same increments without the floor at zero.
+Unrolling the recursion gives $S_n = \max_{0 \leq j \leq n}(R_n - R_j)$, the climb since the walk's lowest point: clipping at zero forgets everything before the last dip.
+The increments being i.i.d., reversing their order changes nothing, so that climb has the law of the walk's highest point in $n$ steps.
+Firing is therefore the event that the walk ever gets $h$ above its start.
+
+The increments have negative mean, so a climb to $h$ is a run of luck.
+Rescale the walk as $Z_n = e^{\theta^{\star} R_n}$: the condition $\E[e^{\theta^{\star} X_k}] = 1$ makes every step multiply $Z$ by a factor averaging one, so $Z$ is a fair game worth $1$ on average, and stays fair if stopped at the first time $\tau$ the walk exceeds $h$.
+Stopped there it is worth at least $e^{\theta^{\star} h}$, and something averaging one reaches that value only that rarely,
+\begin{align*}
+    1 = \E[Z_{\tau \wedge n}] \geq e^{\theta^{\star} h}\,\Pr(\tau \leq n) \,.
+\end{align*}
+Letting $n$ grow gives Eq.~\ref{eq:lundberg}, and solving $e^{-\theta^{\star} h} \leq a$ gives the budget form. \hfill$\blacksquare$
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \bibliographystyle{IEEEtran}

@@ -141,6 +141,36 @@ def add_wifi_args(g):
     return g
 
 
+def require_shift_calibration(a):
+    """Resolve the harness travel, or refuse to run.
+
+    These used to default to 0 -> 60 deg, which are placeholder numbers, not a
+    calibration. A run that silently fell back to them drove the rack in
+    whatever direction those two happened to imply, which on a robot calibrated
+    the other way is straight into the end stop: the servo stalls there and
+    hammers against the guard for the whole event, and nothing on the serial
+    link reports it. Better to stop here than to find out from the noise.
+    """
+    if a.dry_run or a.manual_shift:          # no servo to drive either way
+        if a.shift_centered is None:
+            a.shift_centered = 0.0
+        if a.shift_shifted is None:
+            a.shift_shifted = 60.0
+        return
+    if a.shift_centered is None or a.shift_shifted is None:
+        raise SystemExit(
+            "--shift-centered and --shift-shifted are required for a run on the "
+            "robot.\n"
+            "        Measure them with:  python shifter_test.py --find-travel "
+            "--port <N>\n"
+            "        and pass BOTH. Order matters: centred is where the slug "
+            "rests, shifted\n"
+            "        is where the event ramps it to. Swapping them drives the "
+            "rack the other\n"
+            "        way, into the end stop. No harness fitted? use "
+            "--manual-shift.")
+
+
 def make_link(a):
     # getattr: the bring-up scripts (stand_test, shifter_test) build their own
     # parsers and reuse this constructor, so a missing flag must mean USB.
@@ -228,6 +258,14 @@ def run_bout(arm, seed, a, incumbent, box, free, oracle_target, dt):
         print(f"  !! {physics.n_clipped} joint commands hit the safety limits "
               f"({bi.HIP_RANGE_DEG} / {bi.KNEE_RANGE_DEG} deg) -- the gait is "
               f"asking for more travel than allowed")
+    if physics.n_shift_cmd:
+        lo, hi = physics.shift_cmd_min, physics.shift_cmd_max
+        print(f"  harness commanded {lo:+.0f} .. {hi:+.0f} deg over "
+              f"{physics.n_shift_cmd} ticks (configured "
+              f"{a.shift_centered:+g} -> {a.shift_shifted:+g})")
+        if abs(hi - lo) < 1.0:
+            print("  !! the harness never moved: check --shift-port, and that "
+                  "an event actually engaged")
     if link.n_imu_fail:
         print(f"  !! {link.n_imu_fail} IMU reads failed (last good value reused)")
     if link.max_imu_stale > 20:
@@ -364,7 +402,8 @@ def mode_shift(a):
           f"{a.shift_shifted:g} deg. Watch for the slug binding or the servo "
           f"stalling at either end; narrow the range if it does.\n")
     try:
-        link.joints(link.neutral_pose(shift_deg=a.shift_centered))
+        link.joints(link.neutral_pose(shift_deg=a.shift_centered,
+                                      shift_port=a.shift_port))
         time.sleep(1.0)
         for cycle in range(3):
             for frac in list(np.linspace(0, 1, 40)) + list(np.linspace(1, 0, 40)):
@@ -465,7 +504,12 @@ def main():
     g.add_argument("--pitch-sign", type=float, default=1.0)
     g.add_argument("--contacts", choices=["phase", "none", "all"], default="phase",
                    help="Bittle has no foot-contact sensors; 'phase' feeds the "
-                        "CPG the contact pattern its own oscillator expects")
+                        "CPG the contact pattern its own oscillator expects. NOT "
+                        "neutral: the expectation agrees by construction, so the "
+                        "STOP branch fires every tick, giving effective (1+STOP)*w "
+                        "and (1-STOP)*gamma. 'none'/'all' are diagnostics only -- "
+                        "measured in sim, dropping the term entirely costs ~6x "
+                        "more falls, so do not run the robot that way.")
     g.add_argument("--no-attitude", action="store_true",
                    help="disable the VMC attitude feedback (open-loop CPG)")
     g.add_argument("--attitude-gain", type=float, default=1.0,
@@ -506,11 +550,15 @@ def main():
                         "against servo dither (0 disables)")
     g.add_argument("--shift-port", type=int, default=bi.SHIFT_PORT,
                    help="servo index driving the rack-and-pinion CoM harness")
-    g.add_argument("--shift-centered", type=float, default=0.0,
-                   help="servo angle [deg] with the slug centred")
-    g.add_argument("--shift-shifted", type=float, default=60.0,
-                   help="servo angle [deg] at full CoM offset -- verify the end "
-                        "stop with --mode shift before running")
+    g.add_argument("--shift-centered", type=float, default=None,
+                   help="servo angle [deg] with the slug centred, from "
+                        "shifter_test.py --find-travel. REQUIRED on the robot.")
+    g.add_argument("--shift-shifted", type=float, default=None,
+                   help="servo angle [deg] at full CoM offset, the other half of "
+                        "the --find-travel pair. REQUIRED on the robot. The ORDER "
+                        "matters: centred is where the slug rests, shifted is "
+                        "where the event ramps it to, so swapping the two drives "
+                        "the rack the opposite way, into the end stop.")
     g.add_argument("--manual-shift", action="store_true",
                    help="no harness fitted: prompt the operator to move the "
                         "payload by hand at each event")
@@ -546,6 +594,10 @@ def main():
     g.add_argument("--efe-tau2", type=float, default=0.5)
     g.add_argument("--aif-trigger-vx-std", type=float, default=1000.0)
     a = ap.parse_args()
+    # Before anything opens the serial port: the two modes that drive the
+    # harness must have a real calibration, not a placeholder.
+    if a.mode in ("run", "shift"):
+        require_shift_calibration(a)
 
     incumbent = load_incumbent(a.incumbent_json)
     free = a.free_dims if a.free_dims is not None else FREE_DIMS_PAYLOAD

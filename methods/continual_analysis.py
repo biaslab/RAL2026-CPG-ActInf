@@ -137,6 +137,29 @@ def summary_table(rows):
     return tab
 
 
+def crossentropy_summary(results_dir, prior="upright", **kw):
+    """Per-method (mean, sem) across seeds of the per-bout mean CROSS-ENTROPY to
+    the goal prior (Eq. `criterion` of the paper), computed by
+    `methods.crossentropy_score` from the stored step traces. Returns
+    (dict method -> (mean, sem), floor), the floor being the cross-entropy of a
+    trunk held exactly at the goal -- the log-normalizer 1/2 ln|2 pi Sigma*|,
+    the best value the criterion can take.
+
+    `prior="upright"` takes J on the ATTITUDE marginal. The full prior includes
+    the forward-speed term, which under this payload is ~90% of J for every arm
+    and ranks the clairvoyant oracle WORST (its tolerant gait survives by barely
+    advancing), so it does not order the arms by adaptation quality -- see the
+    module docstring of `crossentropy_score`."""
+    from methods import crossentropy_score as cs
+    rows, _ = cs.score_dir(results_dir, prior=prior, **kw)
+    scored = [r for r in rows if "J" in r]
+    if not scored:
+        return {}, 0.0
+    summ = cs.summarize(scored)
+    return ({m: (d["all_mean"], d["all_sem"]) for m, d in summ.items()},
+            float(scored[0]["const"]))
+
+
 def summary_dataframe(rows):
     """Per-method summary as a pandas DataFrame (nice inline display in a
     notebook): falls per bout, surviving RMS tilt [deg], distance [m], each as
@@ -368,46 +391,69 @@ def fig_trigger(results_dir, seed=4, method="aif", pre=2.0, post=25.0,
     return fig
 
 
-def fig_comparison(rows, title, event_word, out_path=None):
-    """3-panel headline: fall rate / surviving RMS tilt / trial distance per
-    method, mean +/- SEM across seeds, with direct value labels. Saves to
-    out_path if given; returns the matplotlib Figure (for inline display)."""
+def fig_comparison(rows, title, event_word, out_path=None, cxent=None,
+                   cxent_floor=None, drop=()):
+    """3-panel headline: fall rate / stability / trial distance per method,
+    mean +/- SEM across seeds, with direct value labels.
+
+    The stability panel is the CROSS-ENTROPY to the goal prior [nats] when
+    `cxent` is passed (as returned by `crossentropy_summary`), the criterion the
+    paper optimizes, over every event of the bout; bars then grow from
+    `cxent_floor`, the value a trunk held exactly at the goal would score, so
+    their length reads as the excess cross-entropy. Without it the panel falls
+    back to the surviving-events RMS tilt. `drop` omits arms (e.g. an ablation
+    left out of the paper figure). Saves to out_path if given; returns the
+    Figure."""
     plt = _style()
-    methods = methods_present(rows)
+    methods = [m for m in methods_present(rows) if m not in drop]
     tab = summary_table(rows)
+    if cxent:
+        methods = [m for m in methods if m in cxent]
+        for m in methods:
+            tab[m]["cxent"] = cxent[m]
     x = np.arange(len(methods))
     colors = [PALETTE[m] for m in methods]
     hatch = ["///" if m == "noadapt" else None for m in methods]  # relief for gray
 
     fig, axes = plt.subplots(1, 3, figsize=(11, 3.6))
+    mid = (("cxent", "stability: cross-entropy to goal", "nats", "{:.2f}")
+           if cxent else ("tilt", "stability: RMS body tilt", "deg", "{:.1f}"))
     panels = [
-        ("falls", "falls per bout", lambda v: v, "count", "{:.1f}"),
-        ("tilt", "stability: RMS body tilt", lambda v: v, "deg", "{:.1f}"),
-        ("dist", "distance under perturbation", lambda v: v, "m", "{:.0f}"),
+        ("falls", "falls per bout", "count", "{:.1f}"),
+        mid,
+        ("dist", "distance under perturbation", "m", "{:.0f}"),
     ]
-    for ax, (key, ylab, conv, unit, fmt) in zip(axes, panels):
-        means = np.array([conv(tab[m][key][0]) for m in methods])
-        sems = np.array([conv(tab[m][key][1]) for m in methods])
-        bars = ax.bar(x, means, yerr=sems, capsize=3, color=colors,
-                      edgecolor="#333333", linewidth=0.6, width=0.72,
-                      error_kw=dict(lw=1.0, ecolor="#555555"))
+    for ax, (key, ylab, unit, fmt) in zip(axes, panels):
+        means = np.array([tab[m][key][0] for m in methods])
+        sems = np.array([tab[m][key][1] for m in methods])
+        # a cross-entropy is negative here: grow the bars from the goal's own
+        # floor, so bar LENGTH is the excess over a perfectly level trunk.
+        base = cxent_floor if (key == "cxent" and cxent_floor is not None) else 0.0
+        bars = ax.bar(x, means - base, bottom=base, yerr=sems, capsize=3,
+                      color=colors, edgecolor="#333333", linewidth=0.6,
+                      width=0.72, error_kw=dict(lw=1.0, ecolor="#555555"))
         for b, h in zip(bars, hatch):
             if h:
                 b.set_hatch(h)
-        top = np.nanmax(means + np.nan_to_num(sems)) if len(means) else 1.0
-        pad = 0.03 * (top if top else 1.0)
+        span = np.nanmax(np.abs(means - base)) if len(means) else 1.0
+        pad = 0.04 * (span if span else 1.0)
         for xi, mv, sv in zip(x, means, sems):
             if np.isfinite(mv):
                 ax.text(xi, mv + (sv if np.isfinite(sv) else 0.0) + pad,
                         fmt.format(mv), ha="center", va="bottom", fontsize=8.5,
                         color="#222222")
+        if base:
+            ax.set_ylim(base, np.nanmax(means + np.nan_to_num(sems)) + 4 * pad)
+            ax.yaxis.set_major_locator(plt.MaxNLocator(5))
+            ax.axhline(base, color="#666666", lw=0.8, ls=(0, (4, 3)), zorder=1)
         ax.set_xticks(x)
         ax.set_xticklabels([LABELS[m] for m in methods], rotation=30, ha="right",
                            fontsize=8.5)
         ax.set_ylabel(f"{ylab} [{unit}]")
-        ax.set_title(ylab)
+        ax.set_title(ylab + (" (lower is better)" if key == "cxent" else ""))
         ax.margins(y=0.18)
-    fig.suptitle(title, fontsize=12, y=1.02)
+    if title:                  # empty title => bare axes, for a paper figure
+        fig.suptitle(title, fontsize=12, y=1.02)
     fig.tight_layout()
     if out_path:
         fig.savefig(out_path, bbox_inches="tight")

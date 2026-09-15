@@ -17,10 +17,24 @@ Three things are genuinely different on hardware, and each is made explicit here
 rather than papered over:
 
 * **No foot-contact sensors.** The Righetti STOP/FAST feedback in ``JointCPG``
-  needs a per-leg contact bit. Bittle has none, so by default we feed the CPG the
-  contact pattern its own oscillator phase *expects* (stance <=> ``y < 0``), which
-  reproduces the nominal simulated behaviour but carries no disturbance feedback.
-  See ``--contacts``.
+  needs a per-leg contact bit. Bittle has none, so by default (``--contacts
+  phase``) we feed the CPG the contact pattern its own oscillator phase *expects*
+  (stance <=> ``y < 0``).
+
+  Be clear about what that does. The expectation agrees with the phase BY
+  CONSTRUCTION, so the STOP branch fires on essentially every tick and the FAST
+  branch never fires, leaving a permanent
+  ``s_i = STOP*(w_i*x_i - coupling_y_i)``. Folded into the y-update that is
+  ``(1+STOP)`` on the frequency term and ``(1-STOP)`` on the coupling term --
+  at the incumbent ``STOP = 0.5``, a standing 1.5x on w and 0.5x on gamma. So
+  the robot is not running the gait its parameter vector literally names; it is
+  running a consistently gain-scheduled version of it.
+
+  Dropping the term instead (``--contacts none``) is NOT the safer option: it was
+  measured in simulation on 2026-09-15 at ~33.6 falls per 300 s bout against 5.18
+  with the term present, i.e. locomotion stops working. Until the robot has real
+  foot switches, ``phase`` is the right default and the rescaling above is simply
+  part of the hardware controller's definition.
 * **No odometry.** Nothing on the robot measures forward speed, so the CUSUM
   detector's speed-deficit term has nothing to feed on. With ``vx_source="none"``
   (the default) a constant nominal speed is reported, which makes that term
@@ -278,7 +292,9 @@ def expected_contacts(cpg):
 
     Bittle has no foot-contact sensors; feeding the CPG its own expectation
     reproduces what the simulated controller sees on flat ground when the gait is
-    working, at the cost of removing the disturbance feedback path.
+    working. It does NOT remove the contact term -- the agreement is automatic,
+    so the STOP branch is pinned on; see the module docstring for the resulting
+    rescaling of w and gamma.
     """
     return (np.asarray(cpg.y) < 0.0).astype(int)
 
@@ -549,6 +565,8 @@ class BittleLink:
         attitude feedback, the tilt CUSUM and the fall detector at once, and
         leaves every reading looking plausible.
         """
+        if self.dry_run:
+            return
         state = "?"
         for _ in range(2):
             res = self._send(["gb", 0], timeout=1)
@@ -717,12 +735,18 @@ class BittleLink:
                 t_write, t_full)
 
     @staticmethod
-    def neutral_pose(shift_deg=None, hip_deg=None, knee_deg=None):
+    def neutral_pose(shift_deg=None, hip_deg=None, knee_deg=None,
+                     shift_port=None):
         """Standing pose in the indexed [port, deg, ...] form.
 
         ``hip_deg``/``knee_deg`` override the offsets, so a run that raises the
         stance parks at the SAME geometry it walks at -- otherwise the robot
         drops to the default crouch every time it settles or recovers.
+
+        ``shift_port`` MUST be passed by any caller that honours ``--shift-port``.
+        Falling back to the module constant parks a different servo than the one
+        the control loop drives: the harness is then never recentred, and port
+        ``SHIFT_PORT`` gets driven to the harness angle instead.
         """
         hip = HIP_OFFSET_DEG if hip_deg is None else float(hip_deg)
         knee = KNEE_OFFSET_DEG if knee_deg is None else float(knee_deg)
@@ -731,7 +755,8 @@ class BittleLink:
             out += [HIP_PORTS[j], int(round(hip)),
                     KNEE_PORTS[j], int(round(knee))]
         if shift_deg is not None:
-            out += [SHIFT_PORT, int(round(shift_deg))]
+            out += [SHIFT_PORT if shift_port is None else int(shift_port),
+                    int(round(shift_deg))]
         return out
 
 
@@ -753,6 +778,7 @@ class BittlePhysics:
                  settle_t=1.5, cpg_dt=0.01, synthetic=None):
         self.link = link
         self.dt = float(dt)          # control period (serial-limited)
+        self.contacts = contacts
         self.cpg_dt = float(cpg_dt)  # oscillator integration step (see control_tick)
         self.shift_port = int(shift_port)
         # Every control tick packs the eight leg angles and the shift angle into
@@ -768,7 +794,6 @@ class BittlePhysics:
         self.shift_shifted = float(shift_shifted)
         self.manual_shift = bool(manual_shift)
         self.imu_every = max(1, int(imu_every))
-        self.contacts = contacts
         self.attitude = bool(attitude)
         self.attitude_gain = float(attitude_gain)
         # Smoothing (identical to stand_test.py, so the bench and the experiment
@@ -800,6 +825,13 @@ class BittlePhysics:
         self.n_falls = 0
         self.n_clipped = 0
         self.n_diverged = 0
+        # What the harness servo was ACTUALLY commanded this bout. A wrong
+        # --shift-centered/--shift-shifted pair cannot be detected from inside
+        # the loop -- nothing on the link reports a stall, so a rack driven past
+        # its end stop just buzzes against the guard -- so the commanded range is
+        # reported at the end of the bout to be compared against --find-travel.
+        self.shift_cmd_min = self.shift_cmd_max = None
+        self.n_shift_cmd = 0
         self.reset_time = 0.0          # wall seconds spent in operator recoveries
         self._shift_announced = False
         self.t_start = None
@@ -841,8 +873,12 @@ class BittlePhysics:
             self.last_cmd[2 * j] = np.deg2rad(h)
             self.last_cmd[2 * j + 1] = np.deg2rad(k)
         if self.shift_port >= 0 and not self.manual_shift:
-            cmd += [self.shift_port,
-                    self.quant(self.shift_port, self._shift_deg(frac))]
+            shift_deg = self.quant(self.shift_port, self._shift_deg(frac))
+            cmd += [self.shift_port, shift_deg]
+            self.n_shift_cmd += 1
+            d = float(shift_deg)
+            self.shift_cmd_min = d if self.shift_cmd_min is None else min(self.shift_cmd_min, d)
+            self.shift_cmd_max = d if self.shift_cmd_max is None else max(self.shift_cmd_max, d)
         else:
             self._announce_shift(frac)
         self.link.joints(cmd)
@@ -898,6 +934,16 @@ class BittlePhysics:
             except EOFError:                       # unattended run: just wait
                 time.sleep(self.recover_pause)
         self.link.posture("balance", delay=1.0)
+        # Both firmware skills fired above ('k<recover_skill>' and 'kbalance')
+        # switch the firmware's balancing back ON, undoing the 'gb' that
+        # connect() sent. Left on, the firmware and this control loop both write
+        # servo targets every tick: the legs fight the CPG, and the harness
+        # servo -- on a port the firmware also drives -- hammers between the two
+        # targets for the rest of the bout. Nothing else re-asserts it, so one
+        # fall would otherwise poison every event after it. disable_gyro_balance
+        # is ack-checked, so re-sending the toggle is safe.
+        if not self.link.keep_gyro:
+            self.link.disable_gyro_balance()
         time.sleep(self.settle_t)
         if self.synthetic is not None:
             self.synthetic.reset()
@@ -966,7 +1012,8 @@ class BittlePhysics:
         """Neutral stance with the payload centred (safe between-events state)."""
         self.link.joints(self.link.neutral_pose(
             shift_deg=self.shift_centered if self.shift_port >= 0 else None,
-            hip_deg=self.hip_offset, knee_deg=self.knee_offset))
+            hip_deg=self.hip_offset, knee_deg=self.knee_offset,
+            shift_port=self.shift_port))
         # The park bypasses the quantizer and the robot is about to be handled,
         # so both smoothers are holding stale state: start the next tick clean.
         self.quant.reset()

@@ -49,6 +49,31 @@ ATT_REF_DEG = 10.0
 V_FALL = -2.0
 CONDITIONS = ["centered", "shifted"]
 
+# NON-DEGENERACY FLOOR on the two gait amplitudes (dims 3=hipA, 4=kneeA).
+#
+# The parameter box allows hipA = kneeA = 0, which is a robot that does not move
+# its legs. Standing still scores V ~ -0.7 (no forward progress, little tilt)
+# while falling scores V_FALL = -2.0, so whenever no walking gait survives a
+# condition the optimizer's "optimum" is to stop walking -- which is not a gait,
+# and makes the oracle arm a meaningless upper anchor. Fitting below this floor
+# is therefore disallowed: an oracle that does not move means the SCENARIO is
+# mis-set (payload too heavy / offset too large), and we want to see that as a
+# failed fit rather than as a spurious low fall count.
+AMP_DIMS = (3, 4)                 # hipA, kneeA in the 6-D vector
+MIN_AMP = (0.05, 0.25)            # ~half the incumbent's (0.10, 0.50)
+
+
+def _floored_box(lo, hi, min_amp=MIN_AMP):
+    """Search box with the amplitude dims floored away from the standstill gait."""
+    lo = np.asarray(lo, float).copy()
+    for d, m in zip(AMP_DIMS, min_amp):
+        lo[d] = max(lo[d], float(m))
+    return lo, np.asarray(hi, float)
+
+
+def _is_degenerate(x, min_amp=MIN_AMP):
+    return any(float(x[d]) < float(m) - 1e-9 for d, m in zip(AMP_DIMS, min_amp))
+
 
 def _pl():
     spec = importlib.util.spec_from_file_location(
@@ -94,15 +119,54 @@ def _score_tail(res):
     return r_v - (rms_roll + rms_pitch) / ATT_REF_DEG
 
 
+# One PyBullet connection per process, reused across scoring calls (connecting
+# costs far more than a bout).
+_PHYS = []
+
+
+def _physics(pl):
+    if not _PHYS:
+        ph = pl.PayloadPhysics()
+        ph._started = False
+        _PHYS.append(ph)
+    return _PHYS[0]
+
+
+def _run_fixed(pl, phys, cond, params, seed):
+    """One fixed-gait bout under `cond`; returns the dict `_score_tail` wants.
+
+    Drives ``PayloadPhysics`` directly. (This replaced a call to a
+    ``run_experiment.run_trial`` that no longer exists -- the fitter had been
+    broken since that function was removed.)"""
+    if not phys._started:
+        cpg = phys.setup(seed)
+        phys._started = True
+    else:
+        cpg = phys.reset([0.0, 0.0], seed)
+    n = int(FIT_DURATION / pl.DT)
+    t = np.empty(n); vx = np.empty(n); roll = np.empty(n); pitch = np.empty(n)
+    r_prev = p_prev = 0.0
+    fell = False
+    params = np.asarray(params, float)
+    for k in range(n):
+        tt = k * pl.DT
+        frac = (0.0 if cond == "centered" else
+                float(np.clip((tt - SHIFT_EARLY_T) / pl.SHIFT_RAMP_T, 0.0, 1.0)))
+        st = phys.actuate(cpg, params, r_prev, p_prev, frac)
+        t[k], vx[k], roll[k], pitch[k] = tt, st.vx, st.roll, st.pitch
+        r_prev, p_prev = st.roll, st.pitch
+        if st.fell:
+            fell = True
+            t, vx, roll, pitch = t[:k + 1], vx[:k + 1], roll[:k + 1], pitch[:k + 1]
+            break
+    return {"t": t, "vx": vx, "roll": roll, "pitch": pitch, "fell": int(fell)}
+
+
 def _score_params(pl, box, cond, params, seeds):
     """Mean V for a fixed gait under `cond`, over `seeds` seeds."""
-    vs = []
-    for s in range(seeds):
-        res = pl.run_trial(s, "noadapt", 1.0, np.asarray(params, float), box,
-                           _cond_cfg(pl, cond), trigger="ce",
-                           duration=FIT_DURATION)
-        vs.append(_score_tail(res))
-    return float(np.mean(vs))
+    phys = _physics(pl)
+    return float(np.mean([_score_tail(_run_fixed(pl, phys, cond, params, s))
+                          for s in range(seeds)]))
 
 
 def _bo_condition(job):
@@ -116,8 +180,9 @@ def _bo_condition(job):
     from methods.cpg_bounds import bounds_lower, bounds_upper
     cond, incumbent, n_trials, seeds = job
     pl = _pl()
-    lo, hi = bounds_lower.numpy(), bounds_upper.numpy()
-    box = (lo, hi)
+    # score against the FULL box, but never propose a standstill gait
+    box = (bounds_lower.numpy(), bounds_upper.numpy())
+    lo, hi = _floored_box(*box)
     bo = BOOptimizer(
         bounds=torch.tensor(np.vstack([lo, hi]), dtype=torch.double),
         beta_schedule=BetaSchedule(beta_init=5.0, beta_min=1.0,
