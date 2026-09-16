@@ -330,6 +330,8 @@ def _style():
         "axes.spines.top": False, "axes.spines.right": False,
         "axes.grid": True, "grid.alpha": 0.25, "grid.linewidth": 0.6,
         "axes.axisbelow": True, "legend.frameon": False,
+        # TrueType, not the Type 3 default: IEEE submission portals reject Type 3.
+        "pdf.fonttype": 42, "ps.fonttype": 42,
     })
     return plt
 
@@ -460,15 +462,15 @@ def fig_comparison(rows, title, event_word, out_path=None, cxent=None,
     return fig
 
 
-def fig_falls_over_time(results_dir, title, event_word, out_path=None):
+def fig_falls_over_time(results_dir, title, event_word, out_path=None, drop=()):
     """Cumulative falls vs time, mean across seeds per method (from the per-seed
     `logs/*.npz` `cum_falls` traces). No-adapt climbs steadily; a method that
     learns a recovery gait plateaus; the oracle stays flat. Returns the Figure,
-    or None if the logs are absent."""
+    or None if the logs are absent. `drop` omits arms, as in `fig_comparison`."""
     plt = _style()
     log_dir = os.path.join(results_dir, "logs")
     methods = [m for m in METHOD_ORDER
-               if _seed_logs(log_dir, m)]
+               if m not in drop and _seed_logs(log_dir, m)]
     if not methods:
         return None
     fig, ax = plt.subplots(figsize=(7.6, 4.2))

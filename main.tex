@@ -62,7 +62,8 @@
 \title{\LARGE \bf
 % Deciding when and what to re-tune in central pattern generators for quadrupedal locomotion
 % Surprise-triggered re-tuning of central pattern generators for quadrupedal locomotion
-Active inference for event-triggered gait adaptation\\ in quadrupedal robot locomotion
+%Active inference for event-triggered gait adaptation\\ in quadrupedal robot locomotion
+Active inference for event-triggered adaptation of central pattern generator parameters in quadrupedal robot locomotion
 %Event-triggered adaptation of central pattern generators for quadrupedal locomotion
 }
 
@@ -286,15 +287,13 @@ Let $\mathbf{u}_{\theta}$ be distributed as in Eq.~\ref{eq:gp-input}, independen
     \nu_k &= \nu_{k-1} + 1 \, .
 \end{align}
 \end{proposition}
-\emph{Proof:} Marginalizing $\mathbf{u}_{\theta}$ out of Eq.~\ref{eq:marx} is not conjugate, leaving a covariance $W^{-1} + A^\top \Sigma_{\theta} A$ that depends on $A$. Minimizing free energy over $q(A,W)q(\mathbf{u}_{\theta})$ with $q(\mathbf{u}_{\theta})$ clamped to Eq.~\ref{eq:gp-input} keeps conjugacy, because the log of Eq.~\ref{eq:marx} is linear in the statistics $\mathbf{x}_k\mathbf{x}_k^\top$ and $\mathbf{x}_k\mathbf{y}_k^\top$: the update is the known-input one evaluated at $\E[\mathbf{x}_k\mathbf{x}_k^\top] = \bar{\mathbf{x}}_k \bar{\mathbf{x}}_k^\top + \Sigma_{\theta}$ and $\E[\mathbf{x}_k\mathbf{y}_k^\top] = \bar{\mathbf{x}}_k \mathbf{y}_k^\top$.~$\blacksquare$
-
-The alteration is confined to the second moment of the regressor, where the Gaussian process covariance rides as a ridge on the block of $A$ that reads the gait map: a prediction the map is unsure of is attenuated rather than trusted, and the variance thereby left unexplained accumulates in $\Omega_k$ as process noise.
+The proof is in the Appendix. The alteration is confined to the second moment of the regressor, where the Gaussian process covariance rides as a ridge on the block of $A$ that reads the gait map: a prediction the map is unsure of is attenuated rather than trusted, and the variance thereby left unexplained accumulates in $\Omega_k$ as process noise.
 
 Marginalizing $A$ and $W$, and matching moments over $\mathbf{u}_{\theta}$, produces a multivariate location-scale T-distributed posterior predictive distribution:
 \begin{align} \label{eq:predictive}
-	p(\mathbf{y}_k \given \bar{\mathbf{y}}_k, \varphi_k, \theta) = \mathcal{T}_{\nu_k - D_y + 1} \big(\mathbf{y}_k \given \mu_k(\theta), \Sigma_k(\theta)\big) \, ,
+	p(\mathbf{y}_k \given \bar{\mathbf{y}}_k, \varphi_k, \theta) = \mathcal{T}_{\bar{\nu}_k} \big(\mathbf{y}_k \given \mu_k(\theta), \Sigma_k(\theta)\big) \, ,
 \end{align}
-with a mean and a scale matrix
+whose degrees-of-freedom parameter is $\bar{\nu}_{k} = \nu_k  - D_y + 1$ and mean and a scale matrix is
 \begin{align} \label{eq:predictive-moments}
     \mu_k(\theta) &= M_k^\top \bar{\mathbf{x}}_k \, ,  \\
     \Sigma_k(\theta) &= \frac{1 + \bar{\mathbf{x}}_k^\top \Lambda_k^{-1} \bar{\mathbf{x}}_k + \tr\big(\Lambda_k^{-1}\Sigma_{\theta}\big)}{\nu_k - D_y - 1}\,\Omega_k + M_k^\top \Sigma_{\theta} M_k \, . \nonumber
@@ -316,20 +315,19 @@ Safety is not a separate constraint but a consequence of the goal prior. A gait 
 \subsection{Triggering events based on prediction error}
 \label{sec:trigger}
 
-Re-tuning $\theta$ at every step is wasteful and, as Section~\ref{sec:experiments} shows, actively destabilizing, so the agent adapts only when its own predictions leave the goal.
-The perturbations it must survive threaten the \emph{uprightness} of the trunk rather than its speed: a shift that a slower gait can absorb is tolerable, whereas a tilting trunk is not.
-The trigger therefore reads the attitude marginal of the goal prior of Eq.~\ref{eq:goal-prior}, namely the cross-entropy of the one-step predicted pitch and roll $(\mu_k^{\alpha}, \Sigma_k^{\alpha})$ to their level target $\alpha_{\star} = 0$,
+Re-tuning $\theta$ at every step is wasteful and potentially destabilizing, so the agent should adapt only when necessary. We characterize this need as an uncertainty-weighted prediction error on the orientation of the base. The prediction error is defined as the cross-entropy between the attitude marginal of the one-step prediction of Eq.~\ref{eq:predictive}, with location $\mu_k^{\alpha}(\theta)$ and scale $\Sigma_k^{\alpha}(\theta)$, and the attitude marginal of the goal prior. We desire a level base, so the orientation marginal of $\xi_{\star}$ is $0$, and the goal prior variance on orientation $\Sigma_{\star \alpha}$ encodes the permissible deviation around it. The prediction error is:
 \begin{align} \label{eq:trigger-err}
-    \epsilon_k &= H\big[\cN(\mu_k^{\alpha}, \Sigma_k^{\alpha})\,\|\,p(\alpha \given \alpha_{\star}, \Sigma_{\star\alpha})\big] \\
-    &= \tfrac{1}{2}\mu_k^{\alpha\top}\Sigma_{\star\alpha}^{-1}\mu_k^{\alpha} + \tfrac{1}{2}\tr \big(\Sigma_{\star\alpha}^{-1}\Sigma_k^{\alpha}\big) + \text{constants} \,, \nonumber
+    \epsilon_k(\theta) &= H\big[\mathcal{T}_{\bar{nu}_k}\big(\mathbf{y}_k^{\alpha} \given \mu_k^{\alpha}(\theta), \Sigma_k^{\alpha}(\theta)\big)\,\big\|\,p(\alpha \given 0, \Sigma_{\star\alpha})\big] \\
+    &= \tfrac{1}{2}\mu_k^{\alpha}(\theta)^{\top} \Sigma_{\star\alpha}^{-1}\mu_k^{\alpha}(\theta) + \tfrac{1}{2}\tr \big(\Sigma_{\star\alpha}^{-1}\Sigma_k^{\alpha}(\theta)\big) + \text{const.} \,, \nonumber
 \end{align}
-the same cross-entropy-to-goal that Eq.~\ref{eq:EFE} minimizes, restricted to the attitude subspace and evaluated on the belief rather than on a candidate gait.
 It is small while the trunk is predicted level and grows when a perturbation drives it to tilt, requiring no model of the perturbation and no signal of when it occurs.
-Standardizing $\epsilon_k$ against a healthy warm-up baseline $(\bar{\epsilon}, s)$ and accumulating the excess in a one-sided CUSUM,
+The monitor watches the gait that is currently running, so we drop the dependence on $\theta$ below.
+Accumulating its excess over a reference level $\epsilon_0$ in a one-sided cumulative sum (CUSUM),
 \begin{align} \label{eq:trigger-cusum}
-    S_k = \max\big(0,\; S_{k-1} + (\epsilon_k - \bar{\epsilon})/s - \kappa \big) \,,
+    S_k = \max\big(0,\; S_{k-1} + \epsilon_k - \epsilon_0 \big) \,,
 \end{align}
-fires an event when $S_k$ exceeds a bound $h$, the slack $\kappa$ being the per-step surprise tolerated as noise.
+fires an event when $S_k$ exceeds a bound $h$, the reference level $\epsilon_0$ being the per-step surprise tolerated as noise.
+The increment needs no scaling, since $\epsilon_k$ is already uncertainty-weighted: the scale $\Sigma_k^{\alpha}$ of Eq.~\ref{eq:predictive} discounts a deviation by how much the autoregression expects the trunk to vary, so $\epsilon_k$ arrives smoothed and stays in nats.
 Because the CUSUM integrates over time, it registers the sustained mismatch that a perturbation creates while rejecting the stride-frequency ripple that dominates a one-step residual at $100$\,Hz.
 
 Event logic keeps a single perturbation from drawing more than a single correction.
@@ -344,7 +342,7 @@ Sensing and control therefore read one goal prior in two ways: its attitude marg
 %\label{sec:threshold}
 
 The bound $h$ in Eq.~\ref{eq:trigger-cusum} need not be tuned, because the accumulator carries units.
-Since $\epsilon_k$ is a cross-entropy in nats, $s\,S_k$ is the free energy forgone, in nats, by holding the incumbent gait since the excursion began, so $h$ is a \emph{price} rather than a sensitivity.
+Since $\epsilon_k$ is a cross-entropy in nats, $S_k$ is the free energy forgone, in nats, by holding the incumbent gait since the excursion began, so $h$ is a \emph{price} rather than a sensitivity.
 Adapting carries a price of its own: writing $p(\theta) = \cN(\theta_k, \Upsilon^{-1})$ for a prior over gait parameters centered on the incumbent, a switch to $\theta_k + \Delta\theta$ costs
 \begin{align} \label{eq:switch-cost}
     C(\Delta\theta) = -\ln p(\theta_k + \Delta\theta) + c = \tfrac{1}{2}\Delta\theta^{\top}\Upsilon\,\Delta\theta \,,
@@ -353,22 +351,22 @@ paid once at the switch, whereas $\epsilon_k$ is a rate incurred afresh at every
 A threshold on $\epsilon_k$ itself thus compares a rate to a one-time cost, and is either tripped by transients or, set honestly, silent until the robot is already failing.
 Accumulating first removes the inconsistency, and the bound becomes the price,
 \begin{align} \label{eq:threshold}
-    h = C(\Delta\theta)/s \,,
+    h = C(\Delta\theta) \,,
 \end{align}
-turning Eq.~\ref{eq:trigger-cusum} into a payback test: the agent switches once the value forgone by not switching repays what switching costs, after a delay $h/(\bar{e}-\kappa)$ that shortens as the standardized excess $\bar{e}$ grows.
+turning Eq.~\ref{eq:trigger-cusum} into a payback test: the agent switches once the value forgone by not switching repays what switching costs, after a delay that shortens as the mean excess of $\epsilon_k$ over $\epsilon_0$ grows.
 
-Two caveats limit how literally Eq.~\ref{eq:threshold} may be read: it prices only the subspace the gait parameters can steer, so it is a \emph{lower} bound on the principled threshold, and it is only as meaningful as $\Upsilon$.
-At the operating point of Section~\ref{sec:exp-payload}, $h=5$ prices a switch at $0.13$\,nats under the measured $s = 0.025$\,nats, whereas the gaits the agent actually applies lie some twelve prior standard deviations out; pricing that realized move would delay the trigger by a median of $10.8$\,s and silence it in most bouts.
-The realized move is large because the search explores, not because correction demands it, and pricing instead the correction that the belief itself deems necessary, through its control gain, is left to future work.
+%Equation~\ref{eq:threshold} considers only the subspace the gait parameters can steer, so it is a \emph{lower} bound on the principled threshold.
+%At the operating point of Section~\ref{sec:exp-payload}, a switch is priced at $h = 0.125$\,nats, whereas the gaits the agent actually applies lie some twelve prior standard deviations out; pricing that realized move would delay the trigger by a median of $10.8$\,s and silence it in most bouts.
+%The realized move is large because the search explores, not because correction demands it, and pricing instead the correction that the belief itself deems necessary, through its control gain, is left to future work.
 
-Calibration in the experiments below therefore rests on the slack $\kappa$, the only quantity still set by hand.
-Over the $150$\,s of settled nominal walking the standardized excess peaks at $2.69$, so at $\kappa = 3$ every increment of Eq.~\ref{eq:trigger-cusum} is negative; the accumulator is pinned at zero by induction and no false alarm is possible on that sample, whatever $h$ is.
-The bound $h$ then only imposes a short persistence requirement once a perturbation lifts the excess past the slack.
-Beyond the observed support the guarantee weakens from certainty to an exponential rate, and $h$ is what sets it.
+Calibration in the experiments below rests on the reference level $\epsilon_0$, the only quantity still set by hand.
+Over the $150$\,s of settled nominal walking $\epsilon_k$ stays below $\epsilon_0$, so every increment of Eq.~\ref{eq:trigger-cusum} is negative; the accumulator is pinned at zero by induction and no false alarm is possible on that sample, whatever $h$ is.
+The bound $h$ then only imposes a short persistence requirement once a perturbation lifts $\epsilon_k$ past $\epsilon_0$.
+%Beyond the observed support the guarantee weakens from certainty to an exponential rate, and $h$ is what sets it.
 
 \begin{proposition} \label{prop:fpr}
-Write $e_k = (\epsilon_k - \bar{\epsilon})/s$ for the standardized excess and $T = \inf\{k : S_k > h\}$ for the firing time.
-Suppose, conditional on the warm-up estimates $(\bar{\epsilon}, s)$, that the increments $e_k - \kappa$ are independent and identically distributed with negative mean, and that some $\theta_{\star} > 0$ solves $\E\big[e^{\theta_{\star}(e_k - \kappa)}\big] = 1$.
+Write $T = \inf\{k : S_k > h\}$ for the firing time.
+Suppose that the excesses $\epsilon_k - \epsilon_0$ are independent and identically distributed with negative mean, and that some $\theta_{\star} > 0$ solves $\E\big[e^{\theta_{\star}(\epsilon_k - \epsilon_0)}\big] = 1$.
 Then an unperturbed run of unbounded length fires with probability at most
 \begin{align} \label{eq:lundberg}
     \Pr(T < \infty) \leq e^{-\theta_{\star} h} \,,
@@ -379,22 +377,22 @@ so a false-alarm budget $a$ is met by any $h \geq \ln(1/a)/\theta_{\star}$.
 The proof is given in the Appendix.
 The threshold is thus fixed twice over, and not by a sensitivity dial: Eq.~\ref{eq:threshold} prices it against the cost of switching, and Eq.~\ref{eq:lundberg} prices it against the false alarms one is willing to tolerate.
 The two agree at the operating point of Section~\ref{sec:exp-payload}.
-For Gaussian $e_k$ one has $\theta_{\star} = 2(\kappa - \mu)/\sigma^2$, giving $e^{-2\kappa h} = 9\times10^{-14}$ at the standardized values.
-That is optimistic, since $\epsilon_k$ is strongly autocorrelated at $100$\,Hz, with a lag-one correlation of $0.92$ and a long-run variance $8.9$ times the marginal one; substituting the long-run variance for the one-step generating function gives $\theta_{\star} \approx 2.7$ instead.
-A budget of $a = 10^{-6}$ then demands $h \geq 5.1$, within a few percent of the $h = 5$ that the switching price sets independently.
-The transient following a recovery reaches several hundred standard deviations and is kept from firing by the arming logic of Section~\ref{sec:trigger} rather than by $\kappa$.
+For Gaussian $\epsilon_k$ with healthy mean $\mu$ and spread $\sigma$ one has $\theta_{\star} = 2(\epsilon_0 - \mu)/\sigma^2$, which at the measured $\sigma = 0.025$\,nats is $240$\,nats$^{-1}$, giving $e^{-\theta_{\star} h} = 9\times10^{-14}$.
+That is optimistic, since $\epsilon_k$ is strongly autocorrelated at $100$\,Hz, with a lag-one correlation of $0.92$ and a long-run variance $8.9$ times the marginal one; substituting the long-run variance for the one-step generating function gives $\theta_{\star} \approx 108$\,nats$^{-1}$ instead.
+A budget of $a = 10^{-6}$ then demands $h \geq 0.128$\,nats, within a few percent of the $0.125$\,nats that the switching price sets independently.
+The transient following a recovery reaches several hundred standard deviations and is kept from firing by the arming logic of Section~\ref{sec:trigger} rather than by $\epsilon_0$.
 
 No matching guarantee is claimed against missed detections.
-It would require the post-change increments to have positive mean, whereas the payload shift of Section~\ref{sec:exp-payload} raises the mean standardized excess only to $0.93$ against $\kappa=3$, so the accumulator still drifts downward on average and fires through excursions of a heavy-tailed statistic rather than through drift.
+It would require the post-change increments to have positive mean, whereas the payload shift of Section~\ref{sec:exp-payload} raises the mean of $\epsilon_k$ only $0.023$\,nats above healthy against the $0.075$\,nats offset, so the accumulator still drifts downward on average and fires through excursions of a heavy-tailed statistic rather than through drift.
 This suffices in practice, since every event in Section~\ref{sec:exp-payload} is detected, but we treat the false-negative rate as an empirical matter throughout.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{EXPERIMENTS}
 \label{sec:experiments}
 
-We evaluate the unified active inference agent on the Laikago quadruped in PyBullet, under a perturbation of the robot's own dynamics: a shifting trunk payload.
+We evaluate the active inference agent on a Laikago quadruped in PyBullet, under a shifting trunk payload.
 The agent runs with the attitude controller of Section~\ref{sec:vmc} active and adapts only the high-leverage subset of the parameter vector $\theta$ of Eq.~\ref{eq:cpg-parameters}, within fixed bounds throughout, while adaptation is gated by the prediction-error trigger of Section~\ref{sec:trigger}.
-Holding the incumbent gait $\theta_{\star}(\text{flat})$ without adapting is the reference against which the agent is measured.
+We compare it to holding the incumbent gait $\theta_{\star}(\text{flat})$ without adapting.
 Control runs at $\Delta t = 0.01$\,s with a target forward velocity of $0.5$\,m/s.
 Each perturbation event is scored by the criterion of Eq.~\ref{eq:criterion} over a $10$\,s hold window with the ramp-in excluded, and gait switches are ramped in over $0.3$\,s so that the gait never jumps.
 We report that criterion on the attitude marginal of the goal prior and the forward-speed term separately, as distance covered.
@@ -422,11 +420,11 @@ Each bout being paced to real time, a slower optimizer is charged honestly, thro
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{payload_trigger.pdf}
-\caption{The uprightness-only trigger over one payload shift (ours). \emph{Top:} forward speed, which the tolerant gait carries slowly backward under the load. \emph{Middle:} the attitude cross-entropy $\epsilon_k$ rests at its healthy baseline and rises when the shift tilts the trunk (shaded orange until the trigger fires, green once the proposed gait is active); it settles above baseline rather than returning to it. \emph{Bottom:} the CUSUM $S_k$ crosses its threshold $h$ within $0.76$\,s, is held at zero through the settle window, and re-crosses later in the bout without drawing a second adaptation, the monitor having latched for the event.}
+\caption{\emph{Top:} forward speed, which the tolerant gait carries slowly backward under the load. \emph{Middle:} the attitude cross-entropy $\epsilon_k$ rests at its baseline and rises when the shift tilts the trunk (shaded orange until the trigger fires, green once the proposed gait is active). It settles above baseline rather than returning to it. \emph{Bottom:} the CUSUM $S_k$ crosses its threshold $h$ within $0.76$\,s, is held at zero through the settle window, and re-crosses later in the bout without drawing a second adaptation, the monitor having latched for the event.}
 \label{fig:payload-trigger}
 \end{figure}
 
-\subsection{Adapting to payload shifts}
+\subsection{Sudden payload shifts}
 \label{sec:exp-payload}
 
 The scenario perturbs the mass distribution of the robot rather than its actuation.
@@ -438,36 +436,36 @@ The bout is non-episodic and runs for $300$\,s: whenever the robot falls it is s
 A controller that never adapts therefore meets the same perturbation over and over, whereas one that finds a tolerant gait simply holds it and walks on, so an agent that remembers earlier outcomes should stop repeating the parameter choices that fell.
 
 At each detected shift the agent proposes a gait by minimizing the Expected Free Energy of Eq.~\ref{eq:EFE} over its control map, favoring parameters whose predicted outputs lie near the goal while avoiding the regions its memory associates with falling.
-It searches only the high-leverage subset $\{\gamma, \omega_{\text{swing}}, \rev{\eta}, \rev{\lambda}, b\}$ of Eq.~\ref{eq:cpg-parameters}, and the memory persists across recurrences within the trial, so the map fills in as the shift repeats.
+It searches only the high-leverage subset $\{\gamma, \omega_{\text{swing}}, \eta, \lambda, b\}$ of Eq.~\ref{eq:cpg-parameters}, and the memory persists across recurrences within the trial, so the map fills in as the shift repeats.
 Adaptation is triggered by the cross-entropy criterion of Section~\ref{sec:trigger}: the MARX dynamics belief, updated online from the trunk outputs and the measured joint angles, drives the CUSUM once its one-step prediction departs the goal, and re-arms once the robot has recovered after each recenter.
 
-Four further arms, each searching that same subset so that the comparison is head to head, place the agent among the alternatives.
-Three are online optimizers that can judge a candidate gait only by running it: Latin-hypercube sampling (grid search), online Bayesian optimization, and extremum-seeking control, the classical model-free tuner, which dithers each parameter at a distinct frequency and demodulates the event score into a gradient estimate \cite{killingsworth2006extremum}.
+Three baselines are online optimizers that can judge a candidate gait only by running it: Latin-hypercube sampling (grid search), online Bayesian optimization, and extremum-seeking control, which dithers each parameter at a distinct frequency and demodulates the event score into a gradient estimate \cite{killingsworth2006extremum}.
 Extremum seeking is the sharpest form of the difficulty, since even its exploratory dither must be executed on the already-loaded robot.
 The fourth is a clairvoyant oracle that jumps straight to a pre-fit tolerant gait, an upper anchor on any parameter switch.
 
-Because a tolerant gait, once found, simply keeps walking, we run one hundred $300$\,s bouts per method and report the \emph{cumulative} falls that each accrues over a bout rather than a per-event rate (Fig.~\ref{fig:payload-falls}).
-Holding the incumbent, the robot falls $5.18 \pm 0.18$ times per bout (mean $\pm$ s.e.m.), never adapting and tipping over on $85\%$ of recurrences.
+\subsection{Results}
+We report the \emph{cumulative} falls that each method accrues over a bout rather than a per-event rate (Fig.~\ref{fig:payload-falls}).
+Under no adaptation, the robot falls $5.18 \pm 0.18$ times per bout (mean $\pm$ s.e.m.), never adapting and tipping over on $85\%$ of recurrences.
 Our agent instead falls only $0.41 \pm 0.08$ times, finding a tolerant gait after fewer than one fall on average and within the first $20$\,s, after which it holds that gait for the rest of the bout.
 The three online optimizers fall in between, at $1.49 \pm 0.08$ (grid search), $1.59 \pm 0.09$ (Bayesian optimization) and $1.94 \pm 0.05$ (extremum seeking) falls per bout, each significantly worse than our agent (Mann-Whitney on per-seed fall counts, $p < 10^{-26}$).
 They fall more because each can assess a candidate only by executing it on the already-shifted robot, where a poor candidate tips it over rather than merely scoring badly.
 Extremum seeking is worst of the three, significantly worse than both grid search ($p \approx 6 \times 10^{-9}$) and Bayesian optimization ($p \approx 3 \times 10^{-6}$), even though its proposal is the cheapest to compute: its dither is by construction a perturbation applied to the loaded robot, so the exploration it needs in order to estimate a gradient is paid for in falls.
 A clairvoyant oracle never falls, confirming that a recoverable gait exists within the searched subset.
 
-Triggering and proposing are both prompt enough to run online.
+%Triggering and proposing are both prompt enough to run online.
 The goal-prior trigger detects the shift in $0.93$\,s on average, against $1.26$ to $1.38$\,s for the prediction-error monitors driving the other arms, with no false alarms in any arm.
 Under the asynchronous protocol the gait proposal costs a median of one control step, since a tolerant gait is usually found before any Gaussian process fit is needed, rising to $1.74$\,s in the tail once the map is being fit.
 
 The agent also stops re-tuning once a tolerant gait is in place, adapting exactly once per shift event across all one hundred bouts, so it does not chatter (Fig.~\ref{fig:payload-trigger}).
-Two measurements qualify what produces that restraint.
+%Two measurements qualify what produces that restraint.
 The attitude prediction-error does not return to its healthy baseline: it settles about $17\%$ above the pre-shift level, and comes within $10\%$ of baseline in only $5\%$ of bouts, since a load held off-center is never quite free.
 The accumulator does re-cross its threshold later in most bouts, and no second adaptation follows because the monitor latches for the remainder of the event.
-The restraint is therefore a property of the event logic rather than evidence that the residual mismatch has vanished, and whether re-tuning on that residual would help is untested.
+%The restraint is therefore a property of the event logic rather than evidence that the residual mismatch has vanished, and whether re-tuning on that residual would help is untested.
 
 Scored by the criterion itself, much the same ordering appears without a fall ever being counted (Fig.~\ref{fig:payload-comparison}).
 Our agent reaches $-1.11 \pm 0.03$\,nats against $-0.93 \pm 0.01$ for the fixed gait, the three optimizers falling between at $-0.98$ (grid search), $-0.99$ (Bayesian optimization) and $-1.02$ (extremum seeking), and the oracle at $-1.27$, against a floor of $-1.29$ for a trunk held exactly level.
 The margin over each optimizer is significant (Mann-Whitney on per-seed means, $p < 10^{-11}$), whereas the three do not order among themselves as their fall counts do: extremum seeking scores best of them here while falling most, the criterion charging the tilt that precedes a fall rather than the fall itself.
-What the criterion adds is therefore corroboration from the prediction-error side, that the arms which fall less are also the ones held closer to the goal throughout.
+%What the criterion adds is therefore corroboration from the prediction-error side, that the arms which fall less are also the ones held closer to the goal throughout.
 
 At this offset the tolerant gaits are more compromised than the fall counts alone convey (Fig.~\ref{fig:payload-comparison}).
 Every adapting arm settles into a gait that walks slowly \emph{backward} under the load, at $-0.12$\,m/s for our agent and $-0.14$\,m/s for the three optimizers, against a $0.5$\,m/s forward target.
@@ -479,16 +477,12 @@ The benefit here is thus strictly falls avoided, and reaching a gait that walks 
 \label{sec:discussion}
 
 Our results separate two aspects of online adaptation that are easily conflated: deciding \emph{when} to change the gait and deciding \emph{what} to change it to.
-The prediction-error trigger resolves the first cheaply, reading uprightness rather than speed and re-arming to catch a recurring sequence, without a model of the perturbation.
-The second is where the danger lies, since grid search, Bayesian optimization and extremum seeking can judge a candidate gait only by walking on it: on an already-perturbed robot a poor candidate does not merely score badly, it tips the robot over.
+The prediction-error trigger resolves the first, reading uprightness rather than speed and re-arming to catch a recurring sequence, without a model of the perturbation.
+The second is where the danger lies, since grid search, Bayesian optimization and extremum seeking can judge a candidate gait only by walking on it.
 Extremum seeking makes the point most sharply, its dither being a deliberate perturbation of the loaded robot that costs more falls than the two search methods it is cheaper than.
 Our agent instead screens each candidate against a learned map with an explicit memory of past falls, and it does so even though the CPG is already stabilized by the attitude controller, so the benefit is complementary to the reactive posture loop rather than a substitute for it.
 
-The unified formulation is, besides, an architectural economy: one goal prior specifies both when to act and what to do, so the trigger needs no separately tuned detector, and reading uprightness off that prior detects the shift sooner than the hand-tuned monitors driving the other arms.
-We report this as a simplification rather than as a performance result, since these experiments do not separate how much of the reduction in falls is owed to the unified objective and how much to the memory screening alone.
-
-Several limitations qualify these conclusions.
-The evaluation is in simulation, over a single intrinsic perturbation and a modest number of recurrences, and the reference optima are computed offline.
+A strong limitation of this work is that the evaluation is in simulation, over a single intrinsic perturbation and a modest number of recurrences.
 More fundamentally, how much adaptation can recover is capped by the gait parameterization itself: under this payload offset no gait in the searched subset both tolerates the load and advances, the clairvoyant oracle itself walking backward at $0.22$\,m/s, so every online method settles somewhere between it and a standstill.
 Staying upright and making progress are thus in tension here, and our agent, like the others, resolves that tension toward staying upright.
 All arms pay the same price, so the comparison stays clean, but adapting \emph{without} surrendering the locomotion objective is left open, and likely requires a richer control representation rather than a better search within this one.
@@ -512,10 +506,31 @@ How far this recovery generalizes, and how much the gait parameterization itself
                                   % sure that you do not shorten the textheight too much.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\appendix[Proof of Proposition~\ref{prop:mnw}] \label{appx:belief-updating}
+Marginalizing $\mathbf{u}_{\theta}$ out of Eq.~\ref{eq:marx} costs conjugacy: it leaves a covariance $W^{-1} + A^\top \Sigma_{\theta} A$ that filters the gait map's uncertainty through the very coefficients being estimated. We therefore keep $\mathbf{u}_{\theta}$ explicit and minimize variational free energy over the structured factorization $q(A,W)q(\mathbf{u}_{\theta})$, with $q(\mathbf{u}_{\theta})$ clamped to Eq.~\ref{eq:gp-input}; clamping is what fitting the maps offline and holding them fixed buys, in that the gait map is read by the observation rather than re-estimated from it. Free-form minimization over the remaining factor leaves
+\begin{align*}
+    \ln q^{\star}(A,W) = \E_{q(\mathbf{u}_{\theta})} \big[ \ln p(\mathbf{y}_k \given \mathbf{x}_k, A, W) \big] \\ + \ln p(A \given W) p(W) + c \, .
+\end{align*}
+The regressor enters the log of Eq.~\ref{eq:marx} only through $\mathbf{x}_k \mathbf{x}_k^\top$ and $\mathbf{x}_k \mathbf{y}_k^\top$, on which it depends linearly, and $\mathbf{x}_k$ is $\bar{\mathbf{x}}_k$ with its third block replaced by $\mathbf{u}_{\theta}$. The expectation therefore passes onto those statistics alone,
+\begin{align*}
+    \E [\mathbf{x}_k \mathbf{x}_k^\top] = \bar{\mathbf{x}}_k \bar{\mathbf{x}}_k^\top + \Sigma_{\theta} \, , \qquad \E [ \mathbf{x}_k \mathbf{y}_k^\top ] = \bar{\mathbf{x}}_k \mathbf{y}_k^\top \, ,
+\end{align*}
+and conjugacy is retained: the update is the known-input one, run at a second moment inflated by $\Sigma_{\theta}$. Adding the logs of the priors in Eq.~\ref{eq:mnw-prior} and collecting the terms in $A$ gives
+\begin{align*}
+    \tr \big[ W \big( A^\top \Lambda_k A - A^\top \Lambda_k M_k - M_k^\top \Lambda_k A \big) \big]
+\end{align*}
+with $\Lambda_k$ and $\Lambda_k M_k$ as claimed, so completing the square leaves the matrix-normal exponent $\tr [ W (A \! - \! M_k)^\top \Lambda_k (A \! - \! M_k) ]$ and a remainder $-\tr[W M_k^\top \Lambda_k M_k]$ that joins the terms free of $A$ to form $\Omega_k$. Matching the exponent of $|W|$ contributed by the likelihood, the matrix-normal normalizer and the Wishart prior against the Wishart form fixes $\nu_k = \nu_{k-1}+1$.~$\blacksquare$
+
+Evaluating the completed square at $A = M_k$ resolves the scatter increment into three positive semi-definite contributions,
+\begin{align*}
+    \Omega_k - \Omega_{k-1} = (\mathbf{y}_k - M_k^\top \bar{\mathbf{x}}_k)(\mathbf{y}_k - M_k^\top \bar{\mathbf{x}}_k)^\top \qquad \\ + \, (M_k - M_{k-1})^\top \Lambda_{k-1} (M_k - M_{k-1}) + M_k^\top \Sigma_{\theta} M_k \, ,
+\end{align*}
+so $\Omega_k$ remains a valid scatter matrix. The first is the prediction residual, the second the distance the belief was forced to travel, and the third the gait map's own uncertainty read through the coefficients: what the map cannot pin down is booked as process noise rather than as evidence about $A$.
+
 \appendix[Proof of Proposition~\ref{prop:fpr}]
 \label{appx:fpr}
 
-Let $X_k = e_k - \kappa$, so that Eq.~\ref{eq:trigger-cusum} reads $S_k = \max(0, S_{k-1} + X_k)$ from $S_0 = 0$, and let $R_n = X_1 + \dots + X_n$ sum the same increments without the floor at zero.
+Let $X_k = \epsilon_k - \epsilon_0$, so that Eq.~\ref{eq:trigger-cusum} reads $S_k = \max(0, S_{k-1} + X_k)$ from $S_0 = 0$, and let $R_n = X_1 + \dots + X_n$ sum the same increments without the floor at zero.
 Unrolling the recursion gives $S_n = \max_{0 \leq j \leq n}(R_n - R_j)$, the climb since the walk's lowest point: clipping at zero forgets everything before the last dip.
 The increments being i.i.d., reversing their order changes nothing, so that climb has the law of the walk's highest point in $n$ steps.
 Firing is therefore the event that the walk ever gets $h$ above its start.
