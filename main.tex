@@ -2,30 +2,30 @@
 %2345678901234567890123456789012345678901234567890123456789012345678901234567890
 %        1         2         3         4         5         6         7         8
 %
-% ICRA submission, built on the IEEE conference template (template/root.tex).
-% The RA-L version of this manuscript is archived under archive/paper-ral2026/.
+% T-RL submission, built on the IEEE journal template (template/IEEEtran.cls,
+% see template/bare_jrnl_new_sample4.tex and template/New_IEEEtran_how-to.pdf).
+% The ICRA and RA-L versions of this manuscript live in their own repositories
+% and under archive/paper-ral2026/ respectively.
 
-\documentclass[letterpaper, 10 pt, conference]{ieeeconf}  % Comment this line out if you need a4paper
-
-%\documentclass[a4paper, 10pt, conference]{ieeeconf}      % Use this line for a4 paper
-
-\IEEEoverridecommandlockouts                              % This command is only needed if
-                                                          % you want to use the \thanks command
-
-\overrideIEEEmargins                                      % Needed to meet printer requirements.
-
-% See the \addtolength command near the end of this file to balance the column
-% lengths on the last page of the document.
+\documentclass[lettersize,journal]{IEEEtran}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% Packages
-\usepackage{graphicx}   % bitmapped and pdf graphics
+% Packages carried over from the IEEEtran journal template
+\usepackage{amsmath,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{array}
+\usepackage[caption=false,font=normalsize,labelfont=sf,textfont=sf]{subfig}
+\usepackage{textcomp}
+\usepackage{stfloats}
+\usepackage{url}
+\usepackage{verbatim}
+\usepackage{graphicx}
+\usepackage{cite}
+\hyphenation{op-tical net-works semi-conduc-tor IEEE-Xplore}
+
+% Packages specific to this manuscript
 \graphicspath{{figures/}}
-%\usepackage{epstopdf}  % not needed: pdflatex reads .pdf directly (no repstopdf here)
-%\usepackage{mathptmx}   % assumes new font selection scheme installed
-\usepackage{times}      % assumes new font selection scheme installed
-\usepackage{amsmath}
-\usepackage{amsfonts}
 \usepackage{amssymb}
 \let\proof\relax
 \let\endproof\relax
@@ -59,7 +59,7 @@
 \newcommand{\ajith}[2][]{\todo[inline,backgroundcolor=blue!20!white, #1]{(Ajith) #2}}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\title{\LARGE \bf
+\title{
 % Deciding when and what to re-tune in central pattern generators for quadrupedal locomotion
 % Surprise-triggered re-tuning of central pattern generators for quadrupedal locomotion
 %Active inference for event-triggered gait adaptation\\ in quadrupedal robot locomotion
@@ -67,23 +67,29 @@ Active inference for event-triggered adaptation of central pattern generator par
 %Event-triggered adaptation of central pattern generators for quadrupedal locomotion
 }
 
-%\author{Alex Pitoiset$^{1}$, Ajith Anil Meera$^{1}$ and Wouter M. Kouw$^{1}$% <-this % stops a space
-%\thanks{*This work was supported by the Eindhoven Artificial Intelligence Systems Institute and NGF AiNed XS Europe grant.}% <-this % stops a space
-%\thanks{$^{1}$Department of Electrical Engineering, Eindhoven University of Technology, Netherlands {\tt\small w.m.kouw@tue.nl}}%
+% Author block kept commented out, as in the ICRA version.
+%\author{Alex~Pitoiset,~Ajith~Anil~Meera,~and~Wouter~M.~Kouw% <-this % stops a space
+%\thanks{This work was supported by the Eindhoven Artificial Intelligence Systems Institute and NGF AiNed XS Europe grant.}% <-this % stops a space
+%\thanks{The authors are with the Department of Electrical Engineering, Eindhoven University of Technology, Eindhoven, The Netherlands (e-mail: {\tt\small w.m.kouw@tue.nl}).}%
 %}
+
+% The paper headers
+%\markboth{IEEE Transactions on Robotics and Learning,~Vol.~XX, No.~X, 2026}%
+%{Active inference for event-triggered adaptation of central pattern generator parameters}
 
 \begin{document}
 
 \maketitle
-\thispagestyle{empty}
-\pagestyle{empty}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{abstract}
 Central pattern generators with attitude controllers produce signals that coordinate leg motion, allowing legged robots to walk robustly. Its parameters are tuned to the robot body and to the environment in which it operates. Whenever an event occurs that alters the robot's dynamics, the generator parameters may not be optimal again. Under suboptimal parameters, the robot may become unstable and eventually fall. To prevent this, we propose an agent that triggers a parameter updating phase when an uncertainty-weighted prediction error crosses a threshold. The threshold is not tuned, but derived from a false positive rate. In the triggered phase, the agent will propose candidate sets that it believes will restore predictions of level forward motion and restore optimality before it falls. Planning and action is performed by expected free energy minimization. We perform simulated experiments with sudden payload shifts, comparing the proposed active inference agent with state-of-the-art baselines in terms of travel distance. 
 \end{abstract}
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{IEEEkeywords}
+Active inference, central pattern generators, legged robots, event-triggered control, online adaptation, expected free energy.
+\end{IEEEkeywords}
+
 \section{INTRODUCTION}
 \label{sec:introduction}
 
@@ -498,15 +504,10 @@ On a shifting trunk payload, the agent learns within a single bout to stop selec
 A single goal prior serves both decisions, so no separately tuned detector is required.
 How far this recovery generalizes, and how much the gait parameterization itself caps it, remain open.
 
-%\addtolength{\textheight}{-3cm}  % This command serves to balance the column lengths
-                                  % on the last page of the document manually. It shortens
-                                  % the textheight of the last page by a suitable amount.
-                                  % This command does not take effect until the next page
-                                  % so it should come on the page before the last. Make
-                                  % sure that you do not shorten the textheight too much.
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\appendix[Proof of Proposition~\ref{prop:mnw}] \label{appx:belief-updating}
+\appendices
+\section{Proof of Proposition~\ref{prop:mnw}}
+\label{appx:belief-updating}
 Marginalizing $\mathbf{u}_{\theta}$ out of Eq.~\ref{eq:marx} costs conjugacy: it leaves a covariance $W^{-1} + A^\top \Sigma_{\theta} A$ that filters the gait map's uncertainty through the very coefficients being estimated. We therefore keep $\mathbf{u}_{\theta}$ explicit and minimize variational free energy over the structured factorization $q(A,W)q(\mathbf{u}_{\theta})$, with $q(\mathbf{u}_{\theta})$ clamped to Eq.~\ref{eq:gp-input}; clamping is what fitting the maps offline and holding them fixed buys, in that the gait map is read by the observation rather than re-estimated from it. Free-form minimization over the remaining factor leaves
 \begin{align*}
     \ln q^{\star}(A,W) = \E_{q(\mathbf{u}_{\theta})} \big[ \ln p(\mathbf{y}_k \given \mathbf{x}_k, A, W) \big] \\ + \ln p(A \given W) p(W) + c \, .
@@ -527,7 +528,7 @@ Evaluating the completed square at $A = M_k$ resolves the scatter increment into
 \end{align*}
 so $\Omega_k$ remains a valid scatter matrix. The first is the prediction residual, the second the distance the belief was forced to travel, and the third the gait map's own uncertainty read through the coefficients: what the map cannot pin down is booked as process noise rather than as evidence about $A$.
 
-\appendix[Proof of Proposition~\ref{prop:fpr}]
+\section{Proof of Proposition~\ref{prop:fpr}}
 \label{appx:fpr}
 
 Let $X_k = \epsilon_k - \epsilon_0$, so that Eq.~\ref{eq:trigger-cusum} reads $S_k = \max(0, S_{k-1} + X_k)$ from $S_0 = 0$, and let $R_n = X_1 + \dots + X_n$ sum the same increments without the floor at zero.
@@ -542,6 +543,7 @@ Stopped there it is worth at least $e^{\theta_{\star} h}$, and something averagi
     1 = \E[Z_{\tau \wedge n}] \geq e^{\theta_{\star} h}\,\Pr(\tau \leq n) \,.
 \end{align*}
 Letting $n$ grow gives Eq.~\ref{eq:lundberg}, and solving $e^{-\theta_{\star} h} \leq a$ gives the budget form. \hfill$\blacksquare$
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \bibliographystyle{IEEEtran}
